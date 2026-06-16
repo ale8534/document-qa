@@ -1180,8 +1180,249 @@ function Disinfezione({ d, setD, Q_med }: { d: DisinfState; setD: (v: DisinfStat
 // SEZIONE: RIEPILOGO
 // ============================================================
 
+// ============================================================
+// REPORT HTML
+// ============================================================
+
+function generateReport(
+  dati: DatiState, portate: PortateState, omogen: OmogenState,
+  denitri: DenitriState, sbr: SBRState, disinf: DisinfState,
+  idraul: IdraulicaState,
+): string {
+  const pRes = calcPortate(portate);
+  const oRes = calcOmogen(omogen, pRes.Q_med);
+  const dRes = calcDenitri(denitri, pRes.Q_med, portate.N);
+  const sRes = calcSBR(sbr, pRes.Q_med, portate.BOD5);
+  const diRes = calcDisinf(disinf, pRes.Q_med);
+  const hRes = calcIdraulicaAll(idraul.connections, pRes.Q_calc);
+  const today = new Date().toLocaleDateString('it-IT');
+
+  const checks = [
+    { s: 'Omogen.', l: 'V fisico >= V necessario', ok: oRes.V_fisico >= oRes.V_necessario },
+    { s: 'Omogen.', l: 'HRT 2÷8 h', ok: oRes.HRT >= 2 && oRes.HRT <= 8 },
+    { s: 'Omogen.', l: 'P mixer 1÷15 kW', ok: oRes.P_per_mixer >= 1 && oRes.P_per_mixer <= 15 },
+    { s: 'Denitri.', l: 'HRT 1÷4 h', ok: dRes.HRT >= 1 && dRes.HRT <= 4 },
+    { s: 'Denitri.', l: 'ΔN > 0', ok: dRes.dN > 0 },
+    { s: 'SBR', l: 'V singolo >= V bio/n', ok: sRes.V_singolo >= sRes.V_bio_per_reattore },
+    { s: 'SBR', l: 'F/M 0.05÷0.15', ok: sRes.FM >= NORM.bio.FM_min && sRes.FM <= NORM.bio.FM_max },
+    { s: 'SBR', l: 'SRT 10÷20 gg', ok: sbr.SRT >= NORM.bio.theta_c_min && sbr.SRT <= NORM.bio.theta_c_max },
+    { s: 'SBR', l: 'MLSS 2500÷4500 mg/L', ok: sbr.MLSS >= NORM.bio.MLSS_min && sbr.MLSS <= NORM.bio.MLSS_max },
+    { s: 'SBR', l: 'O2 trasferito >= O2 richiesto', ok: sRes.O2_trasferito >= sRes.O2_richiesto },
+    { s: 'Disinf.', l: 'CT >= 30 mg·min/L', ok: diRes.CT >= NORM.disinf.CT_min },
+    { s: 'Disinf.', l: 'c cloro >= 0.5 mg/L', ok: disinf.c_cloro >= NORM.disinf.cl_min },
+    { s: 'Disinf.', l: 'V fisico >= V necessario', ok: diRes.V_fisico >= diRes.V_necessario },
+  ];
+  const nOk = checks.filter(c => c.ok).length;
+  const tot = checks.length;
+
+  const row = (label: string, val: string, unit = '', highlight = false) =>
+    `<tr${highlight ? ' class="hl"' : ''}><td>${label}</td><td><strong>${val}</strong></td><td>${unit}</td></tr>`;
+
+  const checkRow = (s: string, l: string, ok: boolean) =>
+    `<tr><td>${s}</td><td>${l}</td><td class="${ok ? 'ok' : 'no'}">${ok ? '✓ OK' : '✗ NO'}</td></tr>`;
+
+  const parRow = (label: string, val: string, range: string, ok: boolean | null) =>
+    `<tr><td>${label}</td><td>${val}</td><td>${range}</td><td class="${ok === null ? '' : ok ? 'ok' : 'no'}">${ok === null ? '—' : ok ? '✓ OK' : '✗ NO'}</td></tr>`;
+
+  const htmlCons = idraul.connections.length > 0 ? `
+    <h2>5. Idraulica — Connessioni</h2>
+    <table>
+      <thead><tr><th>Da</th><th>A</th><th>Tipo</th><th>Dettaglio</th><th>Stato</th></tr></thead>
+      <tbody>
+        ${idraul.connections.map((con, i) => {
+    const r = hRes[i];
+    return `<tr><td>${getNodeLabel(con.from)}</td><td>${getNodeLabel(con.to)}</td>` +
+      `<td>${CON_TIPO_LABEL[con.tipo]}</td><td style="font-size:9pt">${r?.detail || '—'}</td>` +
+      `<td class="${r?.ok ? 'ok' : 'no'}">${r?.ok ? '✓ OK' : '✗ NO'}</td></tr>`;
+  }).join('\n')}
+      </tbody>
+    </table>` : '';
+
+  const secNum = idraul.connections.length > 0 ? 6 : 5;
+
+  return `<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8">
+  <title>Relazione Tecnica — ${dati.nome || 'SBR'}</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:'Courier New',Courier,monospace;font-size:10.5pt;color:#111;background:#fff;padding:18mm 20mm}
+    h1{font-size:17pt;border-bottom:3px solid #111;padding-bottom:8px;margin-bottom:16px}
+    h2{font-size:12pt;background:#111;color:#fff;padding:5px 12px;margin:28px 0 10px;text-transform:uppercase;letter-spacing:.06em;page-break-before:always}
+    h2:first-of-type{page-break-before:avoid}
+    h3{font-size:10.5pt;color:#333;border-bottom:1px solid #ddd;padding-bottom:4px;margin:18px 0 8px;text-transform:uppercase;letter-spacing:.04em}
+    table{width:100%;border-collapse:collapse;margin-bottom:14px;font-size:9.5pt}
+    th{background:#333;color:#fff;padding:5px 9px;text-align:left;font-weight:700;font-size:8.5pt;text-transform:uppercase;letter-spacing:.04em}
+    td{padding:5px 9px;border-bottom:1px solid #e0e0e0;vertical-align:top}
+    tr.hl td{background:#eef4ff;font-weight:700}
+    tr:nth-child(even) td{background:#f8f8f8}
+    tr.hl td{background:#e8f0ff!important}
+    .ok{color:#157015;font-weight:700}
+    .no{color:#b01010;font-weight:700}
+    .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:20px}
+    .info-box{background:#f3f3f3;padding:12px 14px;border-left:4px solid #111}
+    .info-label{font-size:8pt;color:#666;text-transform:uppercase;letter-spacing:.05em;margin-bottom:2px}
+    .info-val{font-size:13pt;font-weight:700}
+    .norm{background:#111;color:#fff;padding:7px 14px;font-size:9pt;margin-bottom:18px}
+    .big{font-size:38pt;font-weight:700;line-height:1}
+    .btn{position:fixed;top:14px;right:14px;padding:9px 18px;background:#111;color:#fff;border:none;cursor:pointer;font-family:monospace;font-size:11pt;border-radius:4px;z-index:99}
+    .footer{margin-top:36px;padding-top:10px;border-top:1px solid #ccc;font-size:8pt;color:#888}
+    @media print{.btn{display:none}body{padding:8mm 12mm}h2{page-break-before:always}h2:first-of-type{page-break-before:avoid}}
+  </style>
+</head>
+<body>
+  <button class="btn" onclick="window.print()">⎙ Stampa / PDF</button>
+
+  <h1>RELAZIONE TECNICA<br>
+    <span style="font-size:12pt;font-weight:normal">Impianto di Depurazione — Tecnologia SBR (Sequencing Batch Reactor)</span>
+  </h1>
+
+  <div class="norm">Normativa di riferimento: ${NORM.nome}</div>
+
+  <div class="grid2">
+    <div class="info-box"><div class="info-label">Progetto</div><div class="info-val">${dati.nome || '—'}</div></div>
+    <div class="info-box"><div class="info-label">Data</div><div class="info-val">${today}</div></div>
+    <div class="info-box"><div class="info-label">Localita</div><div class="info-val">${dati.localita || '—'}</div></div>
+    <div class="info-box"><div class="info-label">Progettista</div><div class="info-val">${dati.progettista || '—'}</div></div>
+    <div class="info-box"><div class="info-label">Beneficiario</div><div class="info-val">${dati.beneficiario || '—'}</div></div>
+    <div class="info-box"><div class="info-label">Dimensionamento</div><div class="info-val">${portate.modalita === 'AE' ? portate.AE + ' AE' : 'Q diretta'}</div></div>
+  </div>
+
+  <h2>1. Portate di Progetto</h2>
+  <table>
+    <thead><tr><th>Parametro</th><th>Valore</th><th>Unita</th></tr></thead>
+    <tbody>
+      ${row('Q med — portata media giornaliera', fmt(pRes.Q_med, 1), 'm³/g', true)}
+      ${row('Q max,g — portata massima giornaliera', fmt(pRes.Q_max_g, 1), 'm³/g')}
+      ${row('Q max,h — portata massima oraria', fmt(pRes.Q_max_h, 2), 'm³/h')}
+      ${row('Q calcolo (dimensionamento)', fmt(pRes.Q_calc, 2), 'm³/h', true)}
+      ${row('Kd', String(portate.Kd), '—')}
+      ${row('Kh', String(portate.Kh), '—')}
+    </tbody>
+  </table>
+
+  <h3>Qualita Influente vs Limiti di Scarico (${NORM.nome})</h3>
+  <table>
+    <thead><tr><th>Parametro</th><th>Influente (mg/L)</th><th>Limite scarico (mg/L)</th></tr></thead>
+    <tbody>
+      <tr><td>BOD5</td><td>${portate.BOD5}</td><td>${NORM.limiti.BOD5}</td></tr>
+      <tr><td>COD</td><td>${portate.COD}</td><td>${NORM.limiti.COD}</td></tr>
+      <tr><td>SST</td><td>${portate.SST}</td><td>${NORM.limiti.SST}</td></tr>
+      <tr><td>N totale</td><td>${portate.N}</td><td>${NORM.limiti.N_tot}</td></tr>
+      <tr><td>P totale</td><td>${portate.P}</td><td>${NORM.limiti.P_tot}</td></tr>
+    </tbody>
+  </table>
+
+  <h2>2. Dimensionamento Vasche</h2>
+  <table>
+    <thead><tr><th>Vasca</th><th>N</th><th>L (m)</th><th>l (m)</th><th>h (m)</th><th>V unitario (m³)</th><th>V totale (m³)</th></tr></thead>
+    <tbody>
+      <tr><td>Omogenizzazione</td><td>1</td><td>${fmt(omogen.dims.L,1)}</td><td>${fmt(omogen.dims.l,1)}</td><td>${fmt(omogen.dims.h,1)}</td><td>${fmt(oRes.V_fisico,1)}</td><td>${fmt(oRes.V_fisico,1)}</td></tr>
+      <tr><td>Denitrificazione</td><td>1</td><td>${fmt(denitri.dims.L,1)}</td><td>${fmt(denitri.dims.l,1)}</td><td>${fmt(denitri.dims.h,1)}</td><td>${fmt(dRes.V_fisico,1)}</td><td>${fmt(dRes.V_fisico,1)}</td></tr>
+      <tr><td>Reattore SBR</td><td>${sbr.n_reattori}</td><td>${fmt(sbr.dims.L,1)}</td><td>${fmt(sbr.dims.l,1)}</td><td>${fmt(sbr.dims.h,1)}</td><td>${fmt(sRes.V_singolo,1)}</td><td>${fmt(sRes.V_singolo*sbr.n_reattori,1)}</td></tr>
+      <tr><td>Disinfezione</td><td>1</td><td>${fmt(disinf.dims.L,1)}</td><td>${fmt(disinf.dims.l,1)}</td><td>${fmt(disinf.dims.h,1)}</td><td>${fmt(diRes.V_fisico,1)}</td><td>${fmt(diRes.V_fisico,1)}</td></tr>
+      <tr style="background:#111;color:#fff;font-weight:700"><td colspan="5">VOLUME TOTALE IMPIANTO</td><td></td><td>${fmt(oRes.V_fisico+dRes.V_fisico+sRes.V_singolo*sbr.n_reattori+diRes.V_fisico,1)}</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Omogenizzazione</h3>
+  <table>
+    <thead><tr><th>Parametro</th><th>Valore</th><th>Range</th><th>Stato</th></tr></thead>
+    <tbody>
+      ${parRow('HRT', fmt(oRes.HRT,2)+' h', '2÷8 h', oRes.HRT>=2&&oRes.HRT<=8)}
+      ${parRow('V necessario', fmt(oRes.V_necessario,1)+' m³', '<= '+fmt(oRes.V_fisico,1)+' m³', oRes.V_fisico>=oRes.V_necessario)}
+      ${parRow('P per mixer', fmt(oRes.P_per_mixer,2)+' kW', '1÷15 kW', oRes.P_per_mixer>=1&&oRes.P_per_mixer<=15)}
+    </tbody>
+  </table>
+
+  <h3>Denitrificazione</h3>
+  <table>
+    <thead><tr><th>Parametro</th><th>Valore</th><th>Range</th><th>Stato</th></tr></thead>
+    <tbody>
+      ${parRow('HRT', fmt(dRes.HRT,2)+' h', '1÷4 h', dRes.HRT>=1&&dRes.HRT<=4)}
+      ${parRow('ΔN rimosso', fmt(dRes.dN,2)+' mg/L', '> 0', dRes.dN>0)}
+      ${parRow('N rimosso', fmt(dRes.N_rimosso,3)+' kg/g', '—', null)}
+    </tbody>
+  </table>
+
+  <h2>3. Parametri Biologici SBR</h2>
+  <table>
+    <thead><tr><th>Parametro</th><th>Valore</th><th>Range normativa</th><th>Stato</th></tr></thead>
+    <tbody>
+      ${parRow('F/M — Food to Microorganism ratio', fmt(sRes.FM,4)+' kgBOD/kgMLSS·g', '0.05÷0.15', sRes.FM>=0.05&&sRes.FM<=0.15)}
+      ${parRow('SRT — eta del fango', sbr.SRT+' gg', '10÷20 gg', sbr.SRT>=10&&sbr.SRT<=20)}
+      ${parRow('MLSS', sbr.MLSS+' mg/L', '2500÷4500 mg/L', sbr.MLSS>=2500&&sbr.MLSS<=4500)}
+      ${parRow('MLVSS (= MLSS × 0.75)', fmt(sRes.MLVSS,0)+' mg/L', '—', null)}
+      ${parRow('Px — produzione fanghi', fmt(sRes.Px,3)+' kgSS/g', '—', null)}
+      ${parRow('dBOD', fmt(sRes.dBOD,1)+' mg/L', '—', null)}
+      ${parRow('V necessario biologico totale', fmt(sRes.V_necessario_bio,1)+' m³', '<= '+fmt(sRes.V_singolo*sbr.n_reattori,1)+' m³', sRes.V_singolo*sbr.n_reattori>=sRes.V_necessario_bio)}
+    </tbody>
+  </table>
+
+  <h3>Ciclo SBR</h3>
+  <table>
+    <thead><tr><th>Fase</th><th>Durata (min)</th><th>% sul ciclo</th></tr></thead>
+    <tbody>
+      <tr><td>Riempimento (FILL)</td><td>${sbr.t_fill}</td><td>${fmt(sRes.t_ciclo>0?sbr.t_fill/sRes.t_ciclo*100:0,1)}%</td></tr>
+      <tr><td>Reazione (REACT)</td><td>${sbr.t_react}</td><td>${fmt(sRes.t_ciclo>0?sbr.t_react/sRes.t_ciclo*100:0,1)}%</td></tr>
+      <tr><td>Sedimentazione (SEDIM)</td><td>${sbr.t_sedim}</td><td>${fmt(sRes.t_ciclo>0?sbr.t_sedim/sRes.t_ciclo*100:0,1)}%</td></tr>
+      <tr><td>Decantazione (DECANT)</td><td>${sbr.t_decant}</td><td>${fmt(sRes.t_ciclo>0?sbr.t_decant/sRes.t_ciclo*100:0,1)}%</td></tr>
+      <tr><td>Stasi (IDLE)</td><td>${sbr.t_idle}</td><td>${fmt(sRes.t_ciclo>0?sbr.t_idle/sRes.t_ciclo*100:0,1)}%</td></tr>
+      <tr style="font-weight:700"><td>TOTALE CICLO</td><td>${sRes.t_ciclo} min</td><td>100%</td></tr>
+      <tr><td>Cicli al giorno (per reattore)</td><td colspan="2">${sRes.cicli_giorno} cicli/g</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Aerazione</h3>
+  <table>
+    <thead><tr><th>Parametro</th><th>Valore</th><th>Stato</th></tr></thead>
+    <tbody>
+      <tr><td>N diffusori per reattore</td><td>${sbr.n_diffusori}</td><td>—</td></tr>
+      <tr><td>Portata per diffusore</td><td>${sbr.portata_diffusore} Nm³/h</td><td>—</td></tr>
+      <tr class="hl"><td>Q aria totale</td><td>${fmt(sRes.Q_aria,1)} Nm³/h</td><td>—</td></tr>
+      ${parRow('O2 trasferito', fmt(sRes.O2_trasferito,2)+' kgO2/h', '>= O2 richiesto', sRes.O2_trasferito>=sRes.O2_richiesto)}
+      ${parRow('O2 richiesto', fmt(sRes.O2_richiesto,2)+' kgO2/h', '—', null)}
+    </tbody>
+  </table>
+
+  <h2>4. Disinfezione</h2>
+  <table>
+    <thead><tr><th>Parametro</th><th>Valore</th><th>Limite</th><th>Stato</th></tr></thead>
+    <tbody>
+      ${parRow('CT (cloro × tempo contatto)', fmt(diRes.CT,1)+' mg·min/L', '>= 30', diRes.CT>=30)}
+      ${parRow('Concentrazione cloro', disinf.c_cloro+' mg/L', '>= 0.5', disinf.c_cloro>=0.5)}
+      ${parRow('Tempo contatto', disinf.t_contatto+' min', '—', null)}
+      ${parRow('HRT effettivo', fmt(diRes.HRT_eff,1)+' min', '—', null)}
+      ${parRow('Consumo cloro orario', fmt(diRes.consumo_orario,4)+' kg/h', '—', null)}
+      ${parRow('Consumo cloro giornaliero', fmt(diRes.consumo_giornaliero,3)+' kg/g', '—', null)}
+      ${parRow('Consumo cloro annuo', fmt(diRes.consumo_annuo,0)+' kg/anno', '—', null)}
+    </tbody>
+  </table>
+
+  ${htmlCons}
+
+  <h2>${secNum}. Riepilogo Verifiche Normative</h2>
+  <div style="margin-bottom:16px">
+    <span class="big" style="color:${nOk===tot?'#157015':'#b07000'}">${nOk}/${tot}</span>
+    <span style="font-size:13pt;margin-left:12px;color:#444">verifiche superate</span>
+  </div>
+  <table>
+    <thead><tr><th>Sezione</th><th>Verifica</th><th>Stato</th></tr></thead>
+    <tbody>
+      ${checks.map(c => checkRow(c.s, c.l, c.ok)).join('\n')}
+    </tbody>
+  </table>
+
+  <div class="footer">
+    Relazione generata il ${today} con SBR Designer &mdash; Normativa: ${NORM.nome}
+  </div>
+</body>
+</html>`;
+}
+
 function Riepilogo({
-  dati, portate, omogen, denitri, sbr, disinf,
+  dati, portate, omogen, denitri, sbr, disinf, idraul,
 }: {
   dati: DatiState;
   portate: PortateState;
@@ -1189,7 +1430,13 @@ function Riepilogo({
   denitri: DenitriState;
   sbr: SBRState;
   disinf: DisinfState;
+  idraul: IdraulicaState;
 }) {
+  function openReport() {
+    const html = generateReport(dati, portate, omogen, denitri, sbr, disinf, idraul);
+    const w = window.open('', '_blank');
+    if (w) { w.document.write(html); w.document.close(); }
+  }
   const pRes = calcPortate(portate);
   const oRes = calcOmogen(omogen, pRes.Q_med);
   const dRes = calcDenitri(denitri, pRes.Q_med, portate.N);
@@ -1231,6 +1478,23 @@ function Riepilogo({
   return (
     <div>
       <SectionTitle>Riepilogo Impianto</SectionTitle>
+
+      {/* Pulsante stampa */}
+      <div style={{ marginBottom: 16, display: 'flex', gap: 10, alignItems: 'center' }}>
+        <button
+          onClick={openReport}
+          style={{
+            ...mono, padding: '10px 22px', background: '#1a2a1a', borderRadius: 7, cursor: 'pointer',
+            borderTop: 'none', borderRight: 'none', borderBottom: 'none', borderLeft: 'none',
+            color: C.green, fontWeight: 700, fontSize: 13, outline: '1px solid ' + C.green,
+          }}
+        >
+          {'⎙  Stampa Relazione / Esporta PDF'}
+        </button>
+        <span style={{ ...mono, fontSize: 11, color: C.textMid }}>
+          Si apre una nuova scheda — usa Ctrl+P per salvare in PDF
+        </span>
+      </div>
 
       {/* Header progetto */}
       <Card style={{ background: '#0d1117' }}>
@@ -1876,6 +2140,7 @@ export default function App() {
             denitri={denitri}
             sbr={sbr}
             disinf={disinf}
+            idraul={idraul}
           />
         )}
       </div>
