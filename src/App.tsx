@@ -63,6 +63,7 @@ interface DatiState {
 }
 
 interface PortateState {
+  categoria: 'A' | 'B' | 'C' | 'D';
   nr_loc: number;
   qg: number;
   Kzi: number;
@@ -107,6 +108,7 @@ interface SBRState {
   t_sedim: number;
   t_decant: number;
   t_idle: number;
+  AE_biologico: number;
 }
 
 interface DisinfState {
@@ -222,6 +224,13 @@ function getKorNormativo(nr_loc: number): number {
   return 1.25;
 }
 
+const CATEGORIE = [
+  { id: 'A' as const, desc: 'Cismele stradale, senza canalizare', qg: 50, qgMin: 50, qgMax: 50, Kzi: 1.5 },
+  { id: 'B' as const, desc: 'Bransament individual in curte, senza canalizare', qg: 80, qgMin: 80, qgMax: 80, Kzi: 1.4 },
+  { id: 'C' as const, desc: 'Instalatii interioare apa rece+calda+canalizare, preparare individuala', qg: 100, qgMin: 100, qgMax: 120, Kzi: 1.3 },
+  { id: 'D' as const, desc: 'Instalatii interioare apa rece+calda+canalizare, preparare centralizata', qg: 120, qgMin: 120, qgMax: 150, Kzi: 1.2 },
+];
+
 function calcPortate(p: PortateState) {
   const Q_zi_med = p.nr_loc * p.qg / 1000;
   const Q_zi_med_ora = safeDiv(Q_zi_med, 24);
@@ -253,24 +262,25 @@ function calcDenitri(d: DenitriState, Q_med: number, N_in: number) {
 }
 
 function calcSBR(s: SBRState, Q_med: number, BOD5_in: number) {
+  const Q_bio = s.AE_biologico * NORM.AE.Q / 1000;
   const V_singolo = calcVol(s.dims.L, s.dims.l, s.dims.h);
   const dBOD = BOD5_in - NORM.limiti.BOD5;
   const { Y, Kd } = NORM.bio;
   const denomBio = s.MLSS * (1 + Kd * s.SRT);
-  const V_necessario_bio = denomBio > 0 ? (Q_med * s.SRT * Y * dBOD) / denomBio : NaN;
+  const V_necessario_bio = denomBio > 0 ? (Q_bio * s.SRT * Y * dBOD) / denomBio : NaN;
   const t_ciclo = s.t_fill + s.t_react + s.t_sedim + s.t_decant + s.t_idle;
   const cicli_giorno = t_ciclo > 0 ? Math.floor(1440 / t_ciclo) : 0;
   const V_per_ciclo = cicli_giorno > 0 && s.n_reattori > 0
     ? Q_med / (s.n_reattori * cicli_giorno) : NaN;
   const FM = V_singolo > 0 && s.MLSS > 0
-    ? (Q_med * BOD5_in) / (V_singolo * s.MLSS) : NaN;
+    ? (Q_bio * BOD5_in) / (V_singolo * s.MLSS) : NaN;
   const MLVSS = s.MLSS * 0.75;
-  const Px = (Y * Q_med * dBOD / 1000) - (Kd * MLVSS * V_singolo / 1000);
+  const Px = (Y * Q_bio * dBOD / 1000) - (Kd * MLVSS * V_singolo / 1000);
   const Q_aria = s.n_diffusori * s.portata_diffusore;
   const O2_trasferito = Q_aria * 0.21 * 1.29 * 0.25;
-  const O2_richiesto = Q_med > 0 ? (Q_med * dBOD / 1000 / 24) * 1.2 : NaN;
+  const O2_richiesto = Q_bio > 0 ? (Q_bio * dBOD / 1000 / 24) * 1.2 : NaN;
   const V_bio_per_reattore = s.n_reattori > 0 ? V_necessario_bio / s.n_reattori : NaN;
-  return { V_singolo, V_necessario_bio, V_bio_per_reattore, dBOD, t_ciclo, cicli_giorno, V_per_ciclo, FM, MLVSS, Px, Q_aria, O2_trasferito, O2_richiesto };
+  return { Q_bio, V_singolo, V_necessario_bio, V_bio_per_reattore, dBOD, t_ciclo, cicli_giorno, V_per_ciclo, FM, MLVSS, Px, Q_aria, O2_trasferito, O2_richiesto };
 }
 
 function calcDisinf(d: DisinfState, Q_med: number) {
@@ -885,20 +895,67 @@ function DatiGenerali({ dati, setDati }: { dati: DatiState; setDati: (d: DatiSta
 function Portate({ p, setP }: { p: PortateState; setP: (v: PortateState) => void }) {
   const res = calcPortate(p);
   const korNorm = getKorNormativo(p.nr_loc);
+  const cat = CATEGORIE.find(c => c.id === p.categoria) || CATEGORIE[2];
 
   return (
     <div>
       <SectionTitle>Portate — STAS 1846</SectionTitle>
       <Card>
-        <div style={{ ...mono, fontSize: 11, color: C.textMid, marginBottom: 16, padding: '8px 12px', background: '#0d1117', borderRadius: 6, borderLeft: '3px solid ' + C.blue }}>
-          {'Metodo: STAS 1846 — Romania'}
+        <div style={{ ...mono, fontSize: 11, color: C.textMid, marginBottom: 10, textTransform: 'uppercase' as const, letterSpacing: '0.05em' }}>
+          Categoria dotazione idrica — STAS 1846 Tab. 1
+        </div>
+        <div style={{ display: 'flex', gap: 6, marginBottom: 14, flexWrap: 'wrap' as const }}>
+          {CATEGORIE.map(c => {
+            const isSel = p.categoria === c.id;
+            return (
+              <button
+                key={c.id}
+                onClick={() => setP({ ...p, categoria: c.id, qg: c.qg, Kzi: c.Kzi })}
+                style={{
+                  ...mono,
+                  padding: '8px 18px',
+                  borderRadius: 6,
+                  cursor: 'pointer',
+                  background: isSel ? '#1c2a3d' : '#0d1117',
+                  borderTop: isSel ? '2px solid ' + C.blue : '1px solid ' + C.border,
+                  borderRight: isSel ? '2px solid ' + C.blue : '1px solid ' + C.border,
+                  borderBottom: isSel ? '2px solid ' + C.blue : '1px solid ' + C.border,
+                  borderLeft: isSel ? '2px solid ' + C.blue : '1px solid ' + C.border,
+                  color: isSel ? C.blue : C.textMid,
+                  fontSize: 13,
+                  fontWeight: isSel ? 700 : 400,
+                }}
+              >
+                {'Cat. ' + c.id}
+              </button>
+            );
+          })}
+        </div>
+        <div style={{ ...mono, fontSize: 11, padding: '8px 12px', background: '#0d1117', borderRadius: 6, borderLeft: '3px solid ' + C.blue, marginBottom: 14 }}>
+          <span style={{ color: C.text }}>{cat.desc}</span>
+          <span style={{ color: C.amber, marginLeft: 10 }}>
+            {'qg: ' + cat.qgMin + (cat.qgMax !== cat.qgMin ? ' – ' + cat.qgMax : '') + ' L/om/zi  |  Kzi: ' + cat.Kzi}
+          </span>
         </div>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
           <NumInput label="Nr. locuitorii" value={p.nr_loc} unit="loc" step={100} onChange={v => setP({ ...p, nr_loc: v })} />
-          <NumInput label="Consum specific qg" value={p.qg} unit="l/om/zi" step={5} hint="tipico: 100" onChange={v => setP({ ...p, qg: v })} />
-          <NumInput label="Kzi" value={p.Kzi} step={0.05} hint="tipico: 1.4" onChange={v => setP({ ...p, Kzi: v })} />
+          <NumInput
+            label="Consum specific qg"
+            value={p.qg}
+            unit="l/om/zi"
+            step={5}
+            hint={'cat. ' + p.categoria + ': ' + cat.qgMin + (cat.qgMax !== cat.qgMin ? '-' + cat.qgMax : '') + ' L/om/zi'}
+            onChange={v => setP({ ...p, qg: v })}
+          />
+          <NumInput
+            label="Kzi — coeff. zilnic max"
+            value={p.Kzi}
+            step={0.05}
+            hint={'cat. ' + p.categoria + ': ' + cat.Kzi + ' (normativ)'}
+            onChange={v => setP({ ...p, Kzi: v })}
+          />
           <div>
-            <NumInput label="Kor" value={p.Kor} step={0.01} hint={'norm: ' + fmt(korNorm, 2)} onChange={v => setP({ ...p, Kor: v })} />
+            <NumInput label="Kor — coeff. orar max" value={p.Kor} step={0.01} hint={'norm: ' + fmt(korNorm, 2)} onChange={v => setP({ ...p, Kor: v })} />
             <button
               onClick={() => setP({ ...p, Kor: parseFloat(korNorm.toFixed(2)) })}
               style={{ ...mono, fontSize: 10, padding: '3px 10px', background: '#1c2128', borderRadius: 4, cursor: 'pointer', borderTop: 'none', borderRight: 'none', borderBottom: 'none', borderLeft: 'none', color: C.blue, outline: '1px solid ' + C.border, marginTop: 4 }}
@@ -1139,6 +1196,19 @@ function SBR({ s, setS, Q_med, BOD5_in }: { s: SBRState; setS: (v: SBRState) => 
     <div>
       <SectionTitle accent={C.green}>Reattori SBR</SectionTitle>
       <Card>
+        <div style={{ ...mono, fontSize: 11, color: C.textMid, marginBottom: 10, padding: '8px 12px', background: '#0d1117', borderRadius: 6, borderLeft: '3px solid ' + C.amber }}>
+          {'Carico biologico — separato dalle portate idrauliche STAS 1846 (200 L/AE/g vs qg reale)'}
+        </div>
+        <NumInput
+          label="AE equivalenti biologici"
+          value={s.AE_biologico}
+          unit="AE"
+          step={50}
+          hint={'Q bio = ' + fmt(s.AE_biologico * NORM.AE.Q / 1000, 1) + ' m3/g  (AE x ' + NORM.AE.Q + ' L/g)'}
+          onChange={v => setS({ ...s, AE_biologico: v })}
+        />
+      </Card>
+      <Card>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10 }}>
           <NumInput label="N reattori" value={s.n_reattori} unit="" min={1} max={4} step={1} onChange={v => setS({ ...s, n_reattori: Math.max(1, Math.round(v)) })} />
           <NumInput label="MLSS" value={s.MLSS} unit="mg/L" step={100} hint="2500-4500" onChange={v => setS({ ...s, MLSS: v })} />
@@ -1175,6 +1245,7 @@ function SBR({ s, setS, Q_med, BOD5_in }: { s: SBRState; setS: (v: SBRState) => 
         <div style={{ ...mono, fontSize: 11, color: C.textMid, marginBottom: 10, textTransform: 'uppercase' as const, letterSpacing: '0.05em' }}>
           Risultati Biologici
         </div>
+        <ResultRow label="Q biologico (AE x 200 L/g)" value={fmt(res.Q_bio, 1)} unit="m3/g" highlight />
         <ResultRow label="V singolo (scheda tecnica)" value={fmt(res.V_singolo, 1)} unit="m3" highlight />
         <ResultRow label="V necessario bio totale" value={fmt(res.V_necessario_bio, 1)} unit="m3" />
         <ResultRow label="V bio per reattore" value={fmt(res.V_bio_per_reattore, 1)} unit="m3" ok={vOk} />
@@ -2255,10 +2326,11 @@ export default function App() {
   });
 
   const [portate, setPortate] = useState<PortateState>({
+    categoria: 'C',
     nr_loc: 3000,
     qg: 100,
-    Kzi: 1.4,
-    Kor: 2.81,
+    Kzi: 1.3,
+    Kor: 2.50,
     BOD5: NORM.AE.BOD5,
     COD: NORM.AE.COD,
     SST: NORM.AE.SST,
@@ -2305,6 +2377,7 @@ export default function App() {
     t_sedim: 45,
     t_decant: 30,
     t_idle: 5,
+    AE_biologico: 3000,
   });
 
   const [disinf, setDisinf] = useState<DisinfState>({
