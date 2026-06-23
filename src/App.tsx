@@ -613,6 +613,10 @@ function NumInput({
   max?: number;
   step?: number;
 }) {
+  const [localVal, setLocalVal] = React.useState(isNaN(value) ? '' : String(value));
+  React.useEffect(() => {
+    setLocalVal(isNaN(value) ? '' : String(value));
+  }, [value]);
   return (
     <div style={{ marginBottom: 12 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
@@ -624,12 +628,16 @@ function NumInput({
       <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
         <input
           type="number"
-          value={isNaN(value) ? '' : value}
+          value={localVal}
           min={min}
           max={max}
           step={step !== undefined ? step : 'any'}
           readOnly={readOnly}
-          onChange={e => onChange && onChange(parseFloat(e.target.value) || 0)}
+          onChange={e => {
+            setLocalVal(e.target.value);
+            const v = parseFloat(e.target.value);
+            if (!isNaN(v) && onChange) onChange(v);
+          }}
           style={{
             ...mono,
             flex: 1,
@@ -2331,11 +2339,11 @@ export default function App() {
     qg: 100,
     Kzi: 1.3,
     Kor: 2.50,
-    BOD5: NORM.AE.BOD5,
-    COD: NORM.AE.COD,
-    SST: NORM.AE.SST,
-    N: NORM.AE.N,
-    P: NORM.AE.P,
+    BOD5: 220,
+    COD: 450,
+    SST: 250,
+    N: 45,
+    P: 8,
   });
 
   const [profilo, setProfilo] = useState<ProfiloIdraulicoState>({
