@@ -303,7 +303,21 @@ function calcSBR(s: SBRState, Q_med: number, BOD5_in: number) {
   const O2_trasferito = Q_aria * 0.21 * 1.29 * 0.25;
   const O2_richiesto = Q_bio > 0 ? (Q_bio * dBOD / 1000 / 24) * 1.2 : NaN;
   const V_bio_per_reattore = s.n_reattori > 0 ? V_necessario_bio / s.n_reattori : NaN;
-  return { Q_bio, V_singolo, V_necessario_bio, V_bio_per_reattore, dBOD, t_ciclo, cicli_giorno, V_per_ciclo, FM, MLVSS, Px, Q_aria, O2_trasferito, O2_richiesto };
+  const V_totale = V_singolo * s.n_reattori;
+  const BOD5_giorno = Q_med * BOD5_in / 1000;
+  const carico_vol = V_totale > 0 ? BOD5_giorno / V_totale : NaN;
+  const exchange_ratio = V_singolo > 0 && !isNaN(V_per_ciclo) ? V_per_ciclo / V_singolo * 100 : NaN;
+  const V_residuo = !isNaN(V_per_ciclo) ? V_singolo - V_per_ciclo : NaN;
+  const perc_residuo = V_singolo > 0 && !isNaN(V_residuo) ? V_residuo / V_singolo * 100 : NaN;
+  const t_ciclo_giornaliero = cicli_giorno > 0 ? (t_ciclo / 60) * cicli_giorno : NaN;
+  const V_carVol = s.n_reattori > 0 ? BOD5_giorno / 0.25 / s.n_reattori : NaN;
+  const V_HRT_min = s.n_reattori > 0 ? Q_med * 18 / 24 / s.n_reattori : NaN;
+  const V_min_per_reattore = Math.max(
+    isNaN(V_bio_per_reattore) ? 0 : V_bio_per_reattore,
+    isNaN(V_carVol) ? 0 : V_carVol,
+    isNaN(V_HRT_min) ? 0 : V_HRT_min
+  );
+  return { Q_bio, V_singolo, V_necessario_bio, V_bio_per_reattore, dBOD, t_ciclo, cicli_giorno, V_per_ciclo, FM, MLVSS, Px, Q_aria, O2_trasferito, O2_richiesto, V_totale, BOD5_giorno, carico_vol, exchange_ratio, V_residuo, perc_residuo, t_ciclo_giornaliero, V_carVol, V_HRT_min, V_min_per_reattore };
 }
 
 function calcDisinf(d: DisinfState, Q_med: number) {
@@ -1284,13 +1298,21 @@ function CycleBar({ s }: { s: SBRState }) {
 function SBR({ s, setS, Q_med, BOD5_in }: { s: SBRState; setS: (v: SBRState) => void; Q_med: number; BOD5_in: number }) {
   const [showGuide, setShowGuide] = React.useState(false);
   const res = calcSBR(s, Q_med, BOD5_in);
-  const vOk = res.V_singolo >= res.V_bio_per_reattore;
+  const vMinOk = res.V_singolo >= res.V_min_per_reattore;
   const fmOk = res.FM >= NORM.bio.FM_min && res.FM <= NORM.bio.FM_max;
   const srtOk = s.SRT >= NORM.bio.theta_c_min && s.SRT <= NORM.bio.theta_c_max;
   const mlssOk = s.MLSS >= NORM.bio.MLSS_min && s.MLSS <= NORM.bio.MLSS_max;
   const o2Ok = res.O2_trasferito >= res.O2_richiesto;
+  const exchOk = !isNaN(res.exchange_ratio) && res.exchange_ratio >= 10 && res.exchange_ratio <= 35;
+  const residuoOk = !isNaN(res.perc_residuo) && res.perc_residuo >= 20;
+  const carVolOk = !isNaN(res.carico_vol) && res.carico_vol <= 0.25;
+  const tCicloOk = !isNaN(res.t_ciclo_giornaliero) && res.t_ciclo_giornaliero <= 24;
   const checks = [
-    { label: 'V singolo >= V bio/n (' + fmt(res.V_bio_per_reattore, 1) + ' m3)', ok: vOk },
+    { label: 'V singolo >= V min criteri (' + fmt(res.V_min_per_reattore, 1) + ' m3)', ok: vMinOk },
+    { label: 'Exchange ratio: 10 <= ' + fmt(res.exchange_ratio, 1) + '% <= 35', ok: exchOk },
+    { label: 'Volume residuo >= 20% V singolo (' + fmt(res.perc_residuo, 1) + '%)', ok: residuoOk },
+    { label: 'Carico volumetrico <= 0.25 kgBOD5/m3·d (' + fmt(res.carico_vol, 3) + ')', ok: carVolOk },
+    { label: 't ciclo giornaliero <= 24 h/d (' + fmt(res.t_ciclo_giornaliero, 1) + ')', ok: tCicloOk },
     { label: 'F/M: 0.05 <= ' + fmt(res.FM, 4) + ' <= 0.15 kgBOD/kgMLSS·g', ok: fmOk },
     { label: 'SRT: 10 <= ' + s.SRT + ' gg <= 20', ok: srtOk },
     { label: 'MLSS: 2500 <= ' + s.MLSS + ' <= 4500 mg/L', ok: mlssOk },
@@ -1360,11 +1382,16 @@ function SBR({ s, setS, Q_med, BOD5_in }: { s: SBRState; setS: (v: SBRState) => 
         <ResultRow label="Q biologico (= Q zi,med da Portate)" value={fmt(res.Q_bio, 1)} unit="m3/g" highlight />
         <ResultRow label="V singolo (scheda tecnica)" value={fmt(res.V_singolo, 1)} unit="m3" highlight />
         <ResultRow label="V necessario bio totale" value={fmt(res.V_necessario_bio, 1)} unit="m3" />
-        <ResultRow label="V bio per reattore" value={fmt(res.V_bio_per_reattore, 1)} unit="m3" ok={vOk} />
+        <ResultRow label="V bio per reattore" value={fmt(res.V_bio_per_reattore, 1)} unit="m3" ok={vMinOk} />
         <ResultRow label="dBOD (BOD5 in - 25)" value={fmt(res.dBOD, 1)} unit="mg/L" />
         <ResultRow label="t ciclo" value={fmt(res.t_ciclo, 0)} unit="min" />
         <ResultRow label="Cicli/giorno" value={fmt(res.cicli_giorno, 0)} unit="cicli" />
         <ResultRow label="V per ciclo" value={fmt(res.V_per_ciclo, 1)} unit="m3" />
+        <ResultRow label="Exchange ratio (V_ciclo/V_singolo)" value={fmt(res.exchange_ratio, 1)} unit="%" ok={exchOk} sub="range: 10-35%" />
+        <ResultRow label="Volume residuo dopo decant" value={fmt(res.V_residuo, 1)} unit="m3" ok={residuoOk} sub={fmt(res.perc_residuo, 1) + '% del V singolo — min 20%'} />
+        <ResultRow label="Carico volumetrico" value={fmt(res.carico_vol, 3)} unit="kgBOD5/m3·d" ok={carVolOk} sub="max: 0.25" />
+        <ResultRow label="t ciclo giornaliero" value={fmt(res.t_ciclo_giornaliero, 1)} unit="h/d" ok={tCicloOk} sub="max: 24 h/d" />
+        <ResultRow label="V min da 3 criteri (F/M, CarVol, HRT)" value={fmt(res.V_min_per_reattore, 1)} unit="m3/reattore" ok={vMinOk} sub={'F/M=' + fmt(res.V_bio_per_reattore, 1) + ' CarVol=' + fmt(res.V_carVol, 1) + ' HRT=' + fmt(res.V_HRT_min, 1)} />
         <ResultRow label="F/M" value={fmt(res.FM, 4)} unit="kgBOD/kgMLSS·g" ok={fmOk} sub="range: 0.05 - 0.15" />
         <ResultRow label="MLVSS (= MLSS x 0.75)" value={fmt(res.MLVSS, 0)} unit="mg/L" />
         <ResultRow label="Px produzione fanghi" value={fmt(res.Px, 2)} unit="kgSS/g" />
@@ -1433,7 +1460,7 @@ function SBR({ s, setS, Q_med, BOD5_in }: { s: SBRState; setS: (v: SBRState) => 
               desc: 'Volume minimo calcolato dalla formula biologica per garantire la rimozione del BOD5. V singolo deve essere >= V_bio per reattore.',
               range: 'V singolo >= V_bio / N_reattori',
               val: fmt(res.V_necessario_bio, 1) + ' tot / ' + fmt(res.V_bio_per_reattore, 1) + ' per reattore',
-              ok: vOk,
+              ok: vMinOk,
             },
           ].map((item, i) => (
             <div key={i} style={{ marginBottom: 12, padding: '10px 14px', borderRadius: 6, background: '#0d1117', outline: '1px solid ' + (item.ok === undefined ? C.border : item.ok ? '#1a3d2d' : '#3d1a1a') }}>
@@ -2006,7 +2033,11 @@ function Riepilogo({
     { section: 'Denitri', label: 'HRT 1 - 4 h', ok: dRes.HRT >= 1 && dRes.HRT <= 4 },
     { section: 'Denitri', label: 'dN > 0', ok: dRes.dN > 0 },
     { section: 'Denitri', label: 'P mixer 1 - 15 kW', ok: dRes.P_per_mixer >= 1 && dRes.P_per_mixer <= 15 },
-    { section: 'SBR', label: 'V singolo >= V bio/n', ok: sRes.V_singolo >= sRes.V_bio_per_reattore },
+    { section: 'SBR', label: 'V singolo >= V min (3 criteri)', ok: sRes.V_singolo >= sRes.V_min_per_reattore },
+    { section: 'SBR', label: 'Exchange ratio 10-35%', ok: !isNaN(sRes.exchange_ratio) && sRes.exchange_ratio >= 10 && sRes.exchange_ratio <= 35 },
+    { section: 'SBR', label: 'Volume residuo >= 20%', ok: !isNaN(sRes.perc_residuo) && sRes.perc_residuo >= 20 },
+    { section: 'SBR', label: 'Carico volumetrico <= 0.25', ok: !isNaN(sRes.carico_vol) && sRes.carico_vol <= 0.25 },
+    { section: 'SBR', label: 't ciclo <= 24 h/d', ok: !isNaN(sRes.t_ciclo_giornaliero) && sRes.t_ciclo_giornaliero <= 24 },
     { section: 'SBR', label: 'F/M 0.05 - 0.15', ok: sRes.FM >= NORM.bio.FM_min && sRes.FM <= NORM.bio.FM_max },
     { section: 'SBR', label: 'SRT 10 - 20 gg', ok: sbr.SRT >= NORM.bio.theta_c_min && sbr.SRT <= NORM.bio.theta_c_max },
     { section: 'SBR', label: 'MLSS 2500 - 4500 mg/L', ok: sbr.MLSS >= NORM.bio.MLSS_min && sbr.MLSS <= NORM.bio.MLSS_max },
@@ -2224,6 +2255,42 @@ function Riepilogo({
           <ResultRow label="Stoccaggio fango" value={fmt(nmRes.V_fisico, 1)} unit="m3" ok={nmRes.V_fisico >= nmRes.V_necessario} />
           <ResultRow label="Consumo NaOCl" value={fmt(chRes.Vol_NaOCl_giorno, 2)} unit="L/g" />
           <ResultRow label={'Consumo ' + chimice.tipo_precipitante} value={fmt(chRes.Vol_sol_giorno, 2)} unit="L/g" />
+        </div>
+      </Card>
+
+      {/* Rendimenti di abbattimento */}
+      <Card>
+        <div style={{ ...mono, fontSize: 11, color: C.textMid, marginBottom: 12, textTransform: 'uppercase' as const, letterSpacing: '0.05em' }}>
+          Rendimenti di Abbattimento Richiesti (NTPA 001/2002)
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: '0.6fr 0.8fr 0.8fr 0.7fr 0.6fr', gap: 2, marginBottom: 6 }}>
+          {['Parametro', 'C influente', 'Limite NTPA', 'Rendimento', 'Stato'].map((h, i) => (
+            <div key={i} style={{ ...mono, fontSize: 10, color: C.textMid, textTransform: 'uppercase' as const, letterSpacing: '0.05em', padding: '4px 6px' }}>{h}</div>
+          ))}
+        </div>
+        {[
+          { par: 'BOD5', c_in: portate.BOD5, lim: NORM.limiti.BOD5, soglia: 90 },
+          { par: 'COD', c_in: portate.COD, lim: NORM.limiti.COD, soglia: 85 },
+          { par: 'SST', c_in: portate.SST, lim: NORM.limiti.SST, soglia: 85 },
+          { par: 'N tot', c_in: portate.N, lim: NORM.limiti.N_tot, soglia: 80 },
+          { par: 'P tot', c_in: portate.P, lim: NORM.limiti.P_tot, soglia: 85 },
+        ].map((r, i) => {
+          const rend = r.c_in > r.lim ? (r.c_in - r.lim) / r.c_in * 100 : NaN;
+          const alto = !isNaN(rend) && rend > r.soglia;
+          const impossibile = r.c_in <= r.lim;
+          const col = impossibile ? C.red : alto ? C.amber : C.green;
+          return (
+            <div key={i} style={{ display: 'grid', gridTemplateColumns: '0.6fr 0.8fr 0.8fr 0.7fr 0.6fr', gap: 2, padding: '5px 0', borderBottom: '1px solid ' + C.border }}>
+              <span style={{ ...mono, fontSize: 12, color: C.text, fontWeight: 600, padding: '0 6px' }}>{r.par}</span>
+              <span style={{ ...mono, fontSize: 12, color: C.textMid, padding: '0 6px' }}>{r.c_in + ' mg/L'}</span>
+              <span style={{ ...mono, fontSize: 12, color: C.textMid, padding: '0 6px' }}>{r.lim + ' mg/L'}</span>
+              <span style={{ ...mono, fontSize: 13, fontWeight: 700, color: col, padding: '0 6px' }}>{impossibile ? '—' : fmt(rend, 1) + '%'}</span>
+              <span style={{ ...mono, fontSize: 11, color: col, padding: '0 6px' }}>{impossibile ? 'c_in <= limite' : alto ? '⚠ alto' : 'ok'}</span>
+            </div>
+          );
+        })}
+        <div style={{ ...mono, fontSize: 10, color: C.textMid, marginTop: 8 }}>
+          {'Soglie attenzione: BOD5 >90% | COD >85% | SST >85% | N >80% | P >85%'}
         </div>
       </Card>
     </div>
