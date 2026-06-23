@@ -63,13 +63,10 @@ interface DatiState {
 }
 
 interface PortateState {
-  modalita: 'AE' | 'DIRETTA';
-  AE: number;
-  Q_dir: number;
-  Kd: number;
-  Kh: number;
-  override_Q: boolean;
-  Q_override: number;
+  nr_loc: number;
+  qg: number;
+  Kzi: number;
+  Kor: number;
   BOD5: number;
   COD: number;
   SST: number;
@@ -95,6 +92,7 @@ interface DenitriState {
   N_out_target: number;
   n_mixer: number;
   w_mixer: number;
+  perc_denitri: number;
 }
 
 interface SBRState {
@@ -115,6 +113,25 @@ interface DisinfState {
   dims: DimsState;
   c_cloro: number;
   t_contatto: number;
+}
+
+interface ProfiloIdraulicoState {
+  quota_fondo_sx: number;
+  altezza_utile_sx: number;
+  quota_fondo_dx: number;
+  altezza_utile_dx: number;
+  sopraelevazione_dx: number;
+  quota_fondo_sbr: number;
+  quota_scarico: number;
+  quota_arrivo_fognatura: number;
+  quota_scarico_griglia: number;
+}
+
+interface ConnResult {
+  nome: string;
+  gravity: boolean;
+  head: number;
+  note: string;
 }
 
 // ============================================================
@@ -187,12 +204,31 @@ interface Scene3DCon {
 // CALCOLI PURI
 // ============================================================
 
+const KOR_TABLE: [number, number][] = [
+  [500, 3.00], [1000, 2.80], [1500, 2.60], [3000, 2.50],
+  [7000, 2.20], [10000, 2.00], [15000, 1.55], [25000, 1.50],
+  [50000, 1.45], [100000, 1.40], [200000, 1.35], [Infinity, 1.25],
+];
+
+function getKorNormativo(nr_loc: number): number {
+  if (nr_loc <= 500) return 3.00;
+  for (let i = 1; i < KOR_TABLE.length; i++) {
+    const [x0, y0] = KOR_TABLE[i - 1];
+    const [x1, y1] = KOR_TABLE[i];
+    if (nr_loc <= x1) {
+      return y0 + (y1 - y0) * (nr_loc - x0) / (x1 - x0);
+    }
+  }
+  return 1.25;
+}
+
 function calcPortate(p: PortateState) {
-  const Q_med = p.modalita === 'AE' ? p.AE * NORM.AE.Q / 1000 : p.Q_dir;
-  const Q_max_g = Q_med * p.Kd;
-  const Q_max_h = safeDiv(Q_med, 24) * p.Kh;
-  const Q_calc = p.override_Q ? p.Q_override : Q_max_h;
-  return { Q_med, Q_max_g, Q_max_h, Q_calc };
+  const Q_zi_med = p.nr_loc * p.qg / 1000;
+  const Q_zi_med_ora = safeDiv(Q_zi_med, 24);
+  const Q_zi_max = p.Kzi * Q_zi_med;
+  const Q_or_max = p.Kor * Q_zi_max / 24;
+  const Q_or_min = safeDiv(Q_or_max, 20);
+  return { Q_zi_med, Q_zi_med_ora, Q_zi_max, Q_or_max, Q_or_min };
 }
 
 function calcOmogen(o: OmogenState, Q_med: number) {
@@ -247,6 +283,31 @@ function calcDisinf(d: DisinfState, Q_med: number) {
   const consumo_giornaliero = consumo_orario * 24;
   const consumo_annuo = consumo_giornaliero * 365;
   return { V_fisico, CT, V_necessario, HRT_eff, consumo_orario, consumo_giornaliero, consumo_annuo };
+}
+
+function calcProfilo(pf: ProfiloIdraulicoState) {
+  const quota_pelo_sx = pf.quota_fondo_sx + pf.altezza_utile_sx;
+  const altezza_totale_dx = pf.altezza_utile_dx + pf.sopraelevazione_dx;
+  const quota_pelo_dx = pf.quota_fondo_dx + altezza_totale_dx;
+  const altezza_sbr = 5.0;
+  const quota_pelo_sbr = pf.quota_fondo_sbr + altezza_sbr;
+  const quota_accumulo = quota_pelo_dx - altezza_totale_dx * 0.3;
+
+  const c1g = pf.quota_scarico_griglia > quota_pelo_sx + 0.10;
+  const c2g = quota_pelo_sx > quota_pelo_dx + 0.10;
+  const c3g = quota_pelo_dx > pf.quota_fondo_sbr + 0.50;
+  const c4g = pf.quota_fondo_sbr > quota_accumulo + 0.10;
+  const c5g = pf.quota_scarico > quota_accumulo - 0.10;
+
+  const connections: ConnResult[] = [
+    { nome: 'Griglia → Omogenizare', gravity: c1g, head: !c1g ? Math.max(0, quota_pelo_sx - pf.quota_scarico_griglia + 0.50) : 0, note: !c1g ? 'Franco insufficiente — verificare quota scarico griglia' : 'Deflusso per gravita' },
+    { nome: 'Omogenizare → Denitrificare', gravity: c2g, head: !c2g ? Math.max(0, quota_pelo_dx - quota_pelo_sx + 0.50) : 0, note: !c2g ? 'Pelo libero sx inferiore a dx — pompa necessaria' : 'Deflusso per gravita' },
+    { nome: 'Denitrificare → SBR', gravity: c3g, head: !c3g ? Math.max(0, pf.quota_fondo_sbr - quota_pelo_dx + 1.00) : 0, note: !c3g ? 'SBR fuori terra — pompa sollevamento necessaria' : 'Deflusso per gravita' },
+    { nome: 'SBR → Accumulo (decant)', gravity: c4g, head: !c4g ? Math.max(0, quota_accumulo - pf.quota_fondo_sbr + 0.50) : 0, note: !c4g ? 'Quota fondo SBR insufficiente — verificare sopraelevazione dx' : 'Deflusso per gravita' },
+    { nome: 'Accumulo → Scarico', gravity: c5g, head: !c5g ? Math.max(0, quota_accumulo - pf.quota_scarico + 0.50) : 0, note: !c5g ? 'Scarico troppo alto — verificare quota pelo ricettore' : 'Deflusso per gravita' },
+  ];
+
+  return { quota_pelo_sx, altezza_totale_dx, quota_pelo_dx, altezza_sbr, quota_pelo_sbr, quota_accumulo, connections };
 }
 
 // ============================================================
@@ -823,74 +884,73 @@ function DatiGenerali({ dati, setDati }: { dati: DatiState; setDati: (d: DatiSta
 
 function Portate({ p, setP }: { p: PortateState; setP: (v: PortateState) => void }) {
   const res = calcPortate(p);
+  const korNorm = getKorNormativo(p.nr_loc);
+
   return (
     <div>
-      <SectionTitle>Portate</SectionTitle>
+      <SectionTitle>Portate — STAS 1846</SectionTitle>
       <Card>
-        <div style={{ ...mono, fontSize: 11, color: C.textMid, marginBottom: 10, textTransform: 'uppercase' as const, letterSpacing: '0.05em' }}>
-          Modalita di calcolo
+        <div style={{ ...mono, fontSize: 11, color: C.textMid, marginBottom: 16, padding: '8px 12px', background: '#0d1117', borderRadius: 6, borderLeft: '3px solid ' + C.blue }}>
+          {'Metodo: STAS 1846 — Romania'}
         </div>
-        <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
-          {(['AE', 'DIRETTA'] as const).map(m => (
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+          <NumInput label="Nr. locuitorii" value={p.nr_loc} unit="loc" step={100} onChange={v => setP({ ...p, nr_loc: v })} />
+          <NumInput label="Consum specific qg" value={p.qg} unit="l/om/zi" step={5} hint="tipico: 100" onChange={v => setP({ ...p, qg: v })} />
+          <NumInput label="Kzi" value={p.Kzi} step={0.05} hint="tipico: 1.4" onChange={v => setP({ ...p, Kzi: v })} />
+          <div>
+            <NumInput label="Kor" value={p.Kor} step={0.01} hint={'norm: ' + fmt(korNorm, 2)} onChange={v => setP({ ...p, Kor: v })} />
             <button
-              key={m}
-              onClick={() => setP({ ...p, modalita: m })}
-              style={{
-                ...mono,
-                padding: '6px 18px',
-                borderRadius: 6,
-                borderTop: 'none',
-                borderRight: 'none',
-                borderBottom: 'none',
-                borderLeft: p.modalita === m ? '3px solid ' + C.blue : '3px solid transparent',
-                background: p.modalita === m ? '#1c2a3d' : '#0d1117',
-                color: p.modalita === m ? C.blue : C.textMid,
-                cursor: 'pointer',
-                fontSize: 12,
-                fontWeight: 600,
-                outline: '1px solid ' + (p.modalita === m ? C.blue : C.border),
-              }}
+              onClick={() => setP({ ...p, Kor: parseFloat(korNorm.toFixed(2)) })}
+              style={{ ...mono, fontSize: 10, padding: '3px 10px', background: '#1c2128', borderRadius: 4, cursor: 'pointer', borderTop: 'none', borderRight: 'none', borderBottom: 'none', borderLeft: 'none', color: C.blue, outline: '1px solid ' + C.border, marginTop: 4 }}
             >
-              {m}
+              {'Usa valore normativo (' + fmt(korNorm, 2) + ')'}
             </button>
+          </div>
+        </div>
+      </Card>
+
+      <Card>
+        <div style={{ ...mono, fontSize: 11, color: C.textMid, marginBottom: 8, textTransform: 'uppercase' as const, letterSpacing: '0.05em' }}>
+          Tabella Kor — STAS 1846
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 4 }}>
+          {KOR_TABLE.filter(r => isFinite(r[0])).map(([loc, kor]) => (
+            <div key={loc} style={{ ...mono, fontSize: 10, padding: '4px 8px', borderRadius: 4, background: Math.abs(p.nr_loc - loc) < 100 ? '#1c2a3d' : '#0d1117', color: Math.abs(p.nr_loc - loc) < 100 ? C.blue : C.textMid }}>
+              {loc >= 1000 ? (loc / 1000) + 'k' : loc} {'→'} {kor.toFixed(2)}
+            </div>
           ))}
         </div>
-        {p.modalita === 'AE'
-          ? <NumInput label="Abitanti Equivalenti" value={p.AE} unit="AE" step={100} onChange={v => setP({ ...p, AE: v })} />
-          : <NumInput label="Portata Diretta" value={p.Q_dir} unit="m3/g" step={10} onChange={v => setP({ ...p, Q_dir: v })} />
-        }
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-          <NumInput label="Kd — coeff. giornaliero" value={p.Kd} step={0.05} onChange={v => setP({ ...p, Kd: v })} />
-          <NumInput label="Kh — coeff. orario" value={p.Kh} step={0.1} onChange={v => setP({ ...p, Kh: v })} />
-        </div>
       </Card>
+
       <Card>
-        <div style={{ ...mono, fontSize: 11, color: C.textMid, marginBottom: 12, textTransform: 'uppercase' as const, letterSpacing: '0.05em' }}>
+        <div style={{ ...mono, fontSize: 11, color: C.textMid, marginBottom: 10, textTransform: 'uppercase' as const, letterSpacing: '0.05em' }}>
           Portate Calcolate
         </div>
-        <ResultRow label="Q med — portata media giornaliera" value={fmt(res.Q_med, 1)} unit="m3/g" highlight />
-        <ResultRow label="Q max,g — portata massima giornaliera" value={fmt(res.Q_max_g, 1)} unit="m3/g" />
-        <ResultRow label="Q max,h — portata massima oraria" value={fmt(res.Q_max_h, 2)} unit="m3/h" />
-        <div style={{ marginTop: 14 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
-            <input
-              type="checkbox"
-              checked={p.override_Q}
-              onChange={e => setP({ ...p, override_Q: e.target.checked })}
-              style={{ accentColor: C.blue, width: 14, height: 14 }}
-            />
-            <label style={{ ...mono, fontSize: 11, color: C.textMid, textTransform: 'uppercase' as const, letterSpacing: '0.05em', cursor: 'pointer' }}>
-              Override manuale Q calcolo
-            </label>
-          </div>
-          {p.override_Q
-            ? <NumInput label="Q calcolo (manuale)" value={p.Q_override} unit="m3/h" onChange={v => setP({ ...p, Q_override: v })} />
-            : <ResultRow label="Q calcolo = Q max,h" value={fmt(res.Q_calc, 2)} unit="m3/h" highlight />
-          }
-        </div>
+        <ResultRow label="Q zi,med — portata media giornaliera" value={fmt(res.Q_zi_med, 1)} unit="m3/g" highlight />
+        <ResultRow label="Q zi,med,ora — media oraria" value={fmt(res.Q_zi_med_ora, 2)} unit="m3/h" />
+        <ResultRow label="Q zi,max — massima giornaliera" value={fmt(res.Q_zi_max, 1)} unit="m3/g" />
+        <ResultRow label="Q or,max — massima oraria" value={fmt(res.Q_or_max, 2)} unit="m3/h" highlight />
+        <ResultRow label="Q or,min — minima oraria" value={fmt(res.Q_or_min, 2)} unit="m3/h" />
       </Card>
+
       <Card>
-        <div style={{ ...mono, fontSize: 11, color: C.textMid, marginBottom: 12, textTransform: 'uppercase' as const, letterSpacing: '0.05em' }}>
+        <div style={{ ...mono, fontSize: 11, color: C.textMid, marginBottom: 10, textTransform: 'uppercase' as const, letterSpacing: '0.05em' }}>
+          Portata di Dimensionamento per Unita
+        </div>
+        {[
+          ['Canale grigliatura / Pompa sollevamento', fmt(res.Q_or_max, 2), 'm3/h', 'Q or,max'],
+          ['Omogenizare (volume)', fmt(res.Q_zi_med, 1), 'm3/g', 'Q zi,med'],
+          ['Denitrificare (HRT)', fmt(res.Q_zi_med, 1), 'm3/g', 'Q zi,med'],
+          ['Reattori SBR (carico biologico)', fmt(res.Q_zi_med, 1), 'm3/g', 'Q zi,med'],
+          ['Disinfezione (CT)', fmt(res.Q_or_max, 2), 'm3/h', 'Q or,max'],
+          ['Debitmetru', fmt(res.Q_or_max, 2), 'm3/h', 'Q or,max'],
+        ].map(([lbl, val, unit, tipo]) => (
+          <ResultRow key={lbl as string} label={lbl as string} value={val as string} unit={unit as string} sub={tipo as string} />
+        ))}
+      </Card>
+
+      <Card>
+        <div style={{ ...mono, fontSize: 11, color: C.textMid, marginBottom: 10, textTransform: 'uppercase' as const, letterSpacing: '0.05em' }}>
           Qualita Influente
         </div>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
@@ -909,15 +969,19 @@ function Portate({ p, setP }: { p: PortateState; setP: (v: PortateState) => void
 // SEZIONE: OMOGENIZZAZIONE
 // ============================================================
 
-function Omogenizzazione({ o, setO, Q_med }: { o: OmogenState; setO: (v: OmogenState) => void; Q_med: number }) {
+function Omogenizzazione({ o, setO, Q_med, profilo }: { o: OmogenState; setO: (v: OmogenState) => void; Q_med: number; profilo: ProfiloIdraulicoState }) {
   const res = calcOmogen(o, Q_med);
   const hrtOk = res.HRT >= 2 && res.HRT <= 8;
   const pOk = res.P_per_mixer >= 1 && res.P_per_mixer <= 15;
   const vOk = res.V_fisico >= res.V_necessario;
+  const V_disponibile_sx = 92 * profilo.altezza_utile_sx;
+  const perc_utilizzo = safeDiv(res.V_necessario, V_disponibile_sx) * 100;
+  const utilizzoOk = perc_utilizzo <= 100;
   const checks = [
     { label: 'V fisico >= V necessario (' + fmt(res.V_necessario, 1) + ' m3)', ok: vOk },
     { label: 'HRT: 2 <= ' + fmt(res.HRT, 1) + ' h <= 8', ok: hrtOk },
     { label: 'P mixer: 1 <= ' + fmt(res.P_per_mixer, 2) + ' kW <= 15', ok: pOk },
+    { label: 'Utilizzo vasca sx <= 100% (' + fmt(perc_utilizzo, 1) + '%)', ok: utilizzoOk },
   ];
   return (
     <div>
@@ -941,6 +1005,8 @@ function Omogenizzazione({ o, setO, Q_med }: { o: OmogenState; setO: (v: OmogenS
         </div>
         <ResultRow label="V fisico" value={fmt(res.V_fisico, 1)} unit="m3" highlight />
         <ResultRow label="V necessario" value={fmt(res.V_necessario, 1)} unit="m3" ok={vOk} />
+        <ResultRow label="V disponibile vasca sx (92 m² × h)" value={fmt(V_disponibile_sx, 1)} unit="m3" />
+        <ResultRow label="Utilizzo vasca sx" value={fmt(perc_utilizzo, 1)} unit="%" ok={utilizzoOk} />
         <ResultRow label="HRT" value={fmt(res.HRT, 1)} unit="h" ok={hrtOk} sub="range: 2 - 8 h" />
         <ResultRow label="P mixer totale" value={fmt(res.P_mixer_tot, 2)} unit="kW" />
         <ResultRow label="P per mixer" value={fmt(res.P_per_mixer, 2)} unit="kW" ok={pOk} sub="range: 1 - 15 kW" />
@@ -954,15 +1020,19 @@ function Omogenizzazione({ o, setO, Q_med }: { o: OmogenState; setO: (v: OmogenS
 // SEZIONE: DENITRIFICAZIONE
 // ============================================================
 
-function Denitrificazione({ d, setD, Q_med, N_in }: { d: DenitriState; setD: (v: DenitriState) => void; Q_med: number; N_in: number }) {
+function Denitrificazione({ d, setD, Q_med, N_in, profilo }: { d: DenitriState; setD: (v: DenitriState) => void; Q_med: number; N_in: number; profilo: ProfiloIdraulicoState }) {
   const res = calcDenitri(d, Q_med, N_in);
+  const profiloRes = calcProfilo(profilo);
   const hrtOk = res.HRT >= 1 && res.HRT <= 4;
   const dNOk = res.dN > 0;
   const pOk = res.P_per_mixer >= 1 && res.P_per_mixer <= 15;
+  const V_denitri_disponibile = 100 * profiloRes.altezza_totale_dx * (d.perc_denitri / 100);
+  const vDispOk = res.V_fisico <= V_denitri_disponibile;
   const checks = [
     { label: 'HRT: 1 <= ' + fmt(res.HRT, 1) + ' h <= 4', ok: hrtOk },
     { label: 'dN > 0 (' + fmt(res.dN, 1) + ' mg/L)', ok: dNOk },
     { label: 'P mixer: 1 <= ' + fmt(res.P_per_mixer, 2) + ' kW <= 15', ok: pOk },
+    { label: 'V fisico <= V disponibile (' + fmt(V_denitri_disponibile, 1) + ' m3)', ok: vDispOk },
   ];
   return (
     <div>
@@ -978,6 +1048,7 @@ function Denitrificazione({ d, setD, Q_med, N_in }: { d: DenitriState; setD: (v:
           <NumInput label="N out target" value={d.N_out_target} unit="mg/L" step={0.5} hint={'limite: ' + NORM.limiti.N_tot} onChange={v => setD({ ...d, N_out_target: v })} />
           <NumInput label="N mixer" value={d.n_mixer} unit="" step={1} onChange={v => setD({ ...d, n_mixer: v })} />
           <NumInput label="W mixer" value={d.w_mixer} unit="W/m3" hint="cons. 3-5" step={1} onChange={v => setD({ ...d, w_mixer: v })} />
+          <NumInput label="% vasca dx per denitri" value={d.perc_denitri} unit="%" min={10} max={60} step={5} hint="10-60%" onChange={v => setD({ ...d, perc_denitri: v })} />
         </div>
       </Card>
       <Card>
@@ -985,6 +1056,7 @@ function Denitrificazione({ d, setD, Q_med, N_in }: { d: DenitriState; setD: (v:
           Risultati
         </div>
         <ResultRow label="V fisico" value={fmt(res.V_fisico, 1)} unit="m3" highlight />
+        <ResultRow label="V denitri disponibile (profilo)" value={fmt(V_denitri_disponibile, 1)} unit="m3" ok={vDispOk} />
         <ResultRow label="HRT" value={fmt(res.HRT, 1)} unit="h" ok={hrtOk} sub="range: 1 - 4 h" />
         <ResultRow label="N in" value={fmt(N_in, 1)} unit="mg/L" />
         <ResultRow label="N out target" value={fmt(d.N_out_target, 1)} unit="mg/L" />
@@ -1190,11 +1262,11 @@ function generateReport(
   idraul: IdraulicaState,
 ): string {
   const pRes = calcPortate(portate);
-  const oRes = calcOmogen(omogen, pRes.Q_med);
-  const dRes = calcDenitri(denitri, pRes.Q_med, portate.N);
-  const sRes = calcSBR(sbr, pRes.Q_med, portate.BOD5);
-  const diRes = calcDisinf(disinf, pRes.Q_med);
-  const hRes = calcIdraulicaAll(idraul.connections, pRes.Q_calc);
+  const oRes = calcOmogen(omogen, pRes.Q_zi_med);
+  const dRes = calcDenitri(denitri, pRes.Q_zi_med, portate.N);
+  const sRes = calcSBR(sbr, pRes.Q_zi_med, portate.BOD5);
+  const diRes = calcDisinf(disinf, pRes.Q_or_max);
+  const hRes = calcIdraulicaAll(idraul.connections, pRes.Q_or_max);
   const today = new Date().toLocaleDateString('it-IT');
 
   const checks = [
@@ -1286,19 +1358,21 @@ function generateReport(
     <div class="info-box"><div class="info-label">Localita</div><div class="info-val">${dati.localita || '—'}</div></div>
     <div class="info-box"><div class="info-label">Progettista</div><div class="info-val">${dati.progettista || '—'}</div></div>
     <div class="info-box"><div class="info-label">Beneficiario</div><div class="info-val">${dati.beneficiario || '—'}</div></div>
-    <div class="info-box"><div class="info-label">Dimensionamento</div><div class="info-val">${portate.modalita === 'AE' ? portate.AE + ' AE' : 'Q diretta'}</div></div>
+    <div class="info-box"><div class="info-label">Dimensionamento</div><div class="info-val">${portate.nr_loc} loc</div></div>
   </div>
 
   <h2>1. Portate di Progetto</h2>
   <table>
     <thead><tr><th>Parametro</th><th>Valore</th><th>Unita</th></tr></thead>
     <tbody>
-      ${row('Q med — portata media giornaliera', fmt(pRes.Q_med, 1), 'm³/g', true)}
-      ${row('Q max,g — portata massima giornaliera', fmt(pRes.Q_max_g, 1), 'm³/g')}
-      ${row('Q max,h — portata massima oraria', fmt(pRes.Q_max_h, 2), 'm³/h')}
-      ${row('Q calcolo (dimensionamento)', fmt(pRes.Q_calc, 2), 'm³/h', true)}
-      ${row('Kd', String(portate.Kd), '—')}
-      ${row('Kh', String(portate.Kh), '—')}
+      ${row('Q zi,med — portata media giornaliera', fmt(pRes.Q_zi_med, 1), 'm³/g', true)}
+      ${row('Q zi,max — portata massima giornaliera', fmt(pRes.Q_zi_max, 1), 'm³/g')}
+      ${row('Q or,max — portata massima oraria', fmt(pRes.Q_or_max, 2), 'm³/h', true)}
+      ${row('Q or,min — portata minima oraria', fmt(pRes.Q_or_min, 2), 'm³/h')}
+      ${row('Nr. locuitorii', String(portate.nr_loc), 'loc')}
+      ${row('qg (consum specific)', String(portate.qg), 'l/om/zi')}
+      ${row('Kzi', String(portate.Kzi), '—')}
+      ${row('Kor', String(portate.Kor), '—')}
     </tbody>
   </table>
 
@@ -1422,7 +1496,7 @@ function generateReport(
 }
 
 function Riepilogo({
-  dati, portate, omogen, denitri, sbr, disinf, idraul,
+  dati, portate, omogen, denitri, sbr, disinf, idraul, profilo,
 }: {
   dati: DatiState;
   portate: PortateState;
@@ -1431,6 +1505,7 @@ function Riepilogo({
   sbr: SBRState;
   disinf: DisinfState;
   idraul: IdraulicaState;
+  profilo: ProfiloIdraulicoState;
 }) {
   function openReport() {
     const html = generateReport(dati, portate, omogen, denitri, sbr, disinf, idraul);
@@ -1438,10 +1513,10 @@ function Riepilogo({
     if (w) { w.document.write(html); w.document.close(); }
   }
   const pRes = calcPortate(portate);
-  const oRes = calcOmogen(omogen, pRes.Q_med);
-  const dRes = calcDenitri(denitri, pRes.Q_med, portate.N);
-  const sRes = calcSBR(sbr, pRes.Q_med, portate.BOD5);
-  const diRes = calcDisinf(disinf, pRes.Q_med);
+  const oRes = calcOmogen(omogen, pRes.Q_zi_med);
+  const dRes = calcDenitri(denitri, pRes.Q_zi_med, portate.N);
+  const sRes = calcSBR(sbr, pRes.Q_zi_med, portate.BOD5);
+  const diRes = calcDisinf(disinf, pRes.Q_or_max);
 
   const allChecks = [
     { section: 'Omogen', label: 'V fisico >= V necessario', ok: oRes.V_fisico >= oRes.V_necessario },
@@ -1518,13 +1593,13 @@ function Riepilogo({
               Dimensionamento
             </div>
             <div style={{ ...mono, fontSize: 20, fontWeight: 700, color: C.blue }}>
-              {portate.modalita === 'AE' ? portate.AE + ' AE' : 'Q diretta'}
+              {portate.nr_loc + ' loc'}
             </div>
             <div style={{ ...mono, fontSize: 13, color: C.textMid, marginTop: 4 }}>
-              {'Q med = ' + fmt(pRes.Q_med, 1) + ' m3/g'}
+              {'Q zi,med = ' + fmt(pRes.Q_zi_med, 1) + ' m3/g'}
             </div>
             <div style={{ ...mono, fontSize: 12, color: C.textMid, marginTop: 2 }}>
-              {'Q calcolo = ' + fmt(pRes.Q_calc, 2) + ' m3/h'}
+              {'Q or,max = ' + fmt(pRes.Q_or_max, 2) + ' m3/h'}
             </div>
           </div>
         </div>
@@ -1647,8 +1722,8 @@ function Riepilogo({
           Parametri Chiave
         </div>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4 }}>
-          <ResultRow label="Q med" value={fmt(pRes.Q_med, 1)} unit="m3/g" highlight />
-          <ResultRow label="Q calcolo" value={fmt(pRes.Q_calc, 2)} unit="m3/h" />
+          <ResultRow label="Q zi,med" value={fmt(pRes.Q_zi_med, 1)} unit="m3/g" highlight />
+          <ResultRow label="Q or,max" value={fmt(pRes.Q_or_max, 2)} unit="m3/h" />
           <ResultRow label="F/M" value={fmt(sRes.FM, 4)} unit="kgBOD/kgMLSS·g" ok={sRes.FM >= NORM.bio.FM_min && sRes.FM <= NORM.bio.FM_max} />
           <ResultRow label="SRT" value={String(sbr.SRT)} unit="gg" ok={sbr.SRT >= NORM.bio.theta_c_min && sbr.SRT <= NORM.bio.theta_c_max} />
           <ResultRow label="MLSS" value={String(sbr.MLSS)} unit="mg/L" ok={sbr.MLSS >= NORM.bio.MLSS_min && sbr.MLSS <= NORM.bio.MLSS_max} />
@@ -1945,6 +2020,211 @@ function IdraulicaSection({
 }
 
 // ============================================================
+// SEZIONE: PROFILO IDRAULICO
+// ============================================================
+
+function ProfiloIdraulico({
+  pf, setPf,
+}: {
+  pf: ProfiloIdraulicoState;
+  setPf: (v: ProfiloIdraulicoState) => void;
+}) {
+  const res = calcProfilo(pf);
+
+  // SVG layout constants
+  const W = 900;
+  const H = 460;
+  const SCALE = 32; // px per metro
+  const Z_MAX = 7.0;
+  const X_MARGIN = 52;
+  function toY(z: number): number { return 40 + (Z_MAX - z) * SCALE; }
+
+  const yGround = toY(0);
+
+  // Tank X positions
+  const TX_SX = 120;
+  const TW_SX = 120;
+  const TX_DX = 310;
+  const TW_DX = 120;
+  const TX_SBR = 510;
+  const TW_SBR = 130;
+  const TX_SCARICO = 710;
+
+  // Colors
+  const COL_WATER = '#2f81f7';
+  const COL_SLUDGE = '#d29922';
+  const COL_GRAV = '#3fb950';
+  const COL_PUMP = '#f85149';
+  const COL_GROUND = '#8b949e';
+  const COL_WALL = '#30363d';
+
+  function tankRect(tx: number, tw: number, zFondo: number, zPelo: number, zTop: number, colWater: string, label: string, subLabel: string) {
+    const yFondo = toY(zFondo);
+    const yPelo = toY(zPelo);
+    const yTop = toY(zTop);
+    const wallH = yFondo - yTop;
+    return (
+      <g key={label}>
+        {/* Wall */}
+        <rect x={tx} y={yTop} width={tw} height={wallH} fill="#0d1520" stroke={COL_WALL} strokeWidth="1.5" />
+        {/* Water fill */}
+        <rect x={tx + 1} y={yPelo} width={tw - 2} height={yFondo - yPelo} fill={colWater} fillOpacity="0.25" />
+        {/* Water level line */}
+        <line x1={tx} y1={yPelo} x2={tx + tw} y2={yPelo} stroke={colWater} strokeWidth="2" />
+        {/* Label */}
+        <text x={tx + tw / 2} y={yTop - 16} textAnchor="middle" fill={COL_WATER} fontSize="10" fontFamily="monospace" fontWeight="700">{label}</text>
+        <text x={tx + tw / 2} y={yTop - 6} textAnchor="middle" fill={COL_GROUND} fontSize="9" fontFamily="monospace">{subLabel}</text>
+        {/* Pelo libre quota */}
+        <text x={tx + tw + 4} y={yPelo + 4} fill={colWater} fontSize="9" fontFamily="monospace">{fmt(zPelo, 2)}</text>
+        {/* Fondo quota */}
+        <text x={tx + tw + 4} y={yFondo + 4} fill={COL_GROUND} fontSize="9" fontFamily="monospace">{fmt(zFondo, 2)}</text>
+      </g>
+    );
+  }
+
+  function connArrow(x1: number, y1: number, x2: number, y2: number, isGrav: boolean, head: number, label: string) {
+    const color = isGrav ? COL_GRAV : COL_PUMP;
+    const mid_x = (x1 + x2) / 2;
+    const mid_y = (y1 + y2) / 2;
+    return (
+      <g key={label}>
+        <defs>
+          <marker id={'arr-' + label} markerWidth="8" markerHeight="8" refX="4" refY="2" orient="auto">
+            <path d="M0,0 L8,2 L0,4 Z" fill={color} />
+          </marker>
+        </defs>
+        <line x1={x1} y1={y1} x2={x2} y2={y2} stroke={color} strokeWidth="2" strokeDasharray={isGrav ? 'none' : '5,3'} markerEnd={'url(#arr-' + label + ')'} />
+        <text x={mid_x} y={mid_y - 6} textAnchor="middle" fill={color} fontSize="10" fontFamily="monospace" fontWeight="700">
+          {isGrav ? '↓ G' : 'P'}
+        </text>
+        {!isGrav && head > 0 && (
+          <text x={mid_x} y={mid_y + 8} textAnchor="middle" fill={color} fontSize="9" fontFamily="monospace">{fmt(head, 2) + ' m'}</text>
+        )}
+      </g>
+    );
+  }
+
+  const yPeloSx = toY(res.quota_pelo_sx);
+  const yPeloDx = toY(res.quota_pelo_dx);
+  const yFondoSbr = toY(pf.quota_fondo_sbr);
+  const yAccumulo = toY(res.quota_accumulo);
+
+  return (
+    <div>
+      <SectionTitle accent={C.blue}>Profilo Idraulico</SectionTitle>
+
+      <Card>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10 }}>
+          <div>
+            <div style={{ ...mono, fontSize: 10, color: C.purple, marginBottom: 6, textTransform: 'uppercase' as const, letterSpacing: '0.05em', fontWeight: 700 }}>Vasca Sinistra (Omogen + Namol)</div>
+            <NumInput label="Quota fondo" value={pf.quota_fondo_sx} unit="m" step={0.05} onChange={v => setPf({ ...pf, quota_fondo_sx: v })} />
+            <NumInput label="Altezza utile" value={pf.altezza_utile_sx} unit="m" step={0.05} onChange={v => setPf({ ...pf, altezza_utile_sx: v })} />
+            <ResultRow label="Quota pelo lib. sx" value={fmt(res.quota_pelo_sx, 2)} unit="m" highlight />
+          </div>
+          <div>
+            <div style={{ ...mono, fontSize: 10, color: C.amber, marginBottom: 6, textTransform: 'uppercase' as const, letterSpacing: '0.05em', fontWeight: 700 }}>Vasca Destra (Denitri + Accumulo)</div>
+            <NumInput label="Quota fondo" value={pf.quota_fondo_dx} unit="m" step={0.05} onChange={v => setPf({ ...pf, quota_fondo_dx: v })} />
+            <NumInput label="Altezza utile" value={pf.altezza_utile_dx} unit="m" step={0.05} onChange={v => setPf({ ...pf, altezza_utile_dx: v })} />
+            <NumInput label="Sopraelevazione" value={pf.sopraelevazione_dx} unit="m" step={0.05} onChange={v => setPf({ ...pf, sopraelevazione_dx: v })} />
+            <ResultRow label="Quota pelo lib. dx" value={fmt(res.quota_pelo_dx, 2)} unit="m" highlight />
+          </div>
+          <div>
+            <div style={{ ...mono, fontSize: 10, color: C.green, marginBottom: 6, textTransform: 'uppercase' as const, letterSpacing: '0.05em', fontWeight: 700 }}>Moduli SBR (fuori terra)</div>
+            <NumInput label="Quota fondo SBR" value={pf.quota_fondo_sbr} unit="m" step={0.05} onChange={v => setPf({ ...pf, quota_fondo_sbr: v })} />
+            <ResultRow label="Altezza SBR (fissa)" value="5.00" unit="m" />
+            <ResultRow label="Quota pelo SBR" value={fmt(res.quota_pelo_sbr, 2)} unit="m" highlight />
+            <NumInput label="Quota scarico" value={pf.quota_scarico} unit="m" step={0.05} onChange={v => setPf({ ...pf, quota_scarico: v })} />
+          </div>
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginTop: 10 }}>
+          <NumInput label="Quota arrivo fognatura" value={pf.quota_arrivo_fognatura} unit="m" step={0.05} onChange={v => setPf({ ...pf, quota_arrivo_fognatura: v })} />
+          <NumInput label="Quota scarico griglia" value={pf.quota_scarico_griglia} unit="m" step={0.05} onChange={v => setPf({ ...pf, quota_scarico_griglia: v })} />
+        </div>
+      </Card>
+
+      {/* SVG Profile */}
+      <Card>
+        <div style={{ ...mono, fontSize: 11, color: C.textMid, marginBottom: 10, textTransform: 'uppercase' as const, letterSpacing: '0.05em' }}>
+          Profilo Idraulico — Sezione Verticale
+        </div>
+        <svg viewBox={'0 0 ' + W + ' ' + H} style={{ width: '100%', background: '#0d1117', borderRadius: 6, display: 'block' }}>
+
+          {/* Vertical scale */}
+          {[-4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 6].map(z => (
+            <g key={z}>
+              <line x1={X_MARGIN - 4} y1={toY(z)} x2={W - 10} y2={toY(z)} stroke={z === 0 ? '#3fb950' : '#1c2535'} strokeWidth={z === 0 ? 1.5 : 0.5} strokeDasharray={z === 0 ? '6,3' : '2,4'} />
+              <text x={X_MARGIN - 8} y={toY(z) + 4} textAnchor="end" fill={z === 0 ? '#3fb950' : '#3d4d5e'} fontSize="9" fontFamily="monospace">{(z >= 0 ? '+' : '') + z.toFixed(2)}</text>
+            </g>
+          ))}
+
+          {/* Ground level label */}
+          <text x={W - 12} y={yGround - 4} textAnchor="end" fill="#3fb950" fontSize="9" fontFamily="monospace" fontWeight="700">p.c. = 0.00 m</text>
+
+          {/* Fognatura arrow */}
+          <defs>
+            <marker id="arrf" markerWidth="8" markerHeight="8" refX="6" refY="2" orient="auto">
+              <path d="M0,0 L8,2 L0,4 Z" fill={C.textMid} />
+            </marker>
+          </defs>
+          <line x1={10} y1={toY(pf.quota_arrivo_fognatura)} x2={TX_SX - 4} y2={toY(pf.quota_arrivo_fognatura)} stroke={C.textMid} strokeWidth="2" markerEnd="url(#arrf)" />
+          <text x={12} y={toY(pf.quota_arrivo_fognatura) - 5} fill={C.textMid} fontSize="9" fontFamily="monospace">{'Fognatura ' + fmt(pf.quota_arrivo_fognatura, 2) + ' m'}</text>
+
+          {/* Left tank */}
+          {tankRect(TX_SX, TW_SX, pf.quota_fondo_sx, res.quota_pelo_sx, pf.quota_fondo_sx + pf.altezza_utile_sx + 0.3, COL_SLUDGE, 'Omogenizare', 'Namol exces')}
+
+          {/* Connection 1: griglia -> omogen */}
+          {connArrow(TX_SX - 20, toY(pf.quota_scarico_griglia), TX_SX, toY(pf.quota_scarico_griglia), res.connections[0].gravity, res.connections[0].head, 'c1')}
+
+          {/* Connection 2: omogen -> denitri */}
+          {connArrow(TX_SX + TW_SX, yPeloSx, TX_DX, yPeloSx, res.connections[1].gravity, res.connections[1].head, 'c2')}
+
+          {/* Right tank */}
+          {tankRect(TX_DX, TW_DX, pf.quota_fondo_dx, res.quota_pelo_dx, pf.quota_fondo_dx + res.altezza_totale_dx + 0.3, COL_WATER, 'Denitrificare', 'Accumulo')}
+
+          {/* Accumulo level indicator */}
+          <line x1={TX_DX} y1={yAccumulo} x2={TX_DX + TW_DX} y2={yAccumulo} stroke={C.amber} strokeWidth="1" strokeDasharray="4,2" />
+          <text x={TX_DX - 4} y={yAccumulo + 4} textAnchor="end" fill={C.amber} fontSize="8" fontFamily="monospace">acc.</text>
+
+          {/* Connection 3: denitri -> SBR */}
+          {connArrow(TX_DX + TW_DX, yPeloDx, TX_SBR, yFondoSbr, res.connections[2].gravity, res.connections[2].head, 'c3')}
+
+          {/* SBR module */}
+          {tankRect(TX_SBR, TW_SBR, pf.quota_fondo_sbr, res.quota_pelo_sbr - 1.0, res.quota_pelo_sbr, COL_WATER, 'SBR', 'h=5.00 m')}
+
+          {/* Connection 4: SBR -> accumulo */}
+          {connArrow(TX_SBR, yFondoSbr, TX_DX + TW_DX, yAccumulo, res.connections[3].gravity, res.connections[3].head, 'c4')}
+
+          {/* Connection 5: accumulo -> scarico */}
+          {connArrow(TX_DX + TW_DX / 2, yAccumulo, TX_SCARICO, toY(pf.quota_scarico), res.connections[4].gravity, res.connections[4].head, 'c5')}
+          <text x={TX_SCARICO + 4} y={toY(pf.quota_scarico) + 4} fill={COL_GROUND} fontSize="9" fontFamily="monospace">{'Scarico ' + fmt(pf.quota_scarico, 2) + ' m'}</text>
+        </svg>
+      </Card>
+
+      {/* Connection summary table */}
+      <Card>
+        <div style={{ ...mono, fontSize: 11, color: C.textMid, marginBottom: 10, textTransform: 'uppercase' as const, letterSpacing: '0.05em' }}>
+          Riepilogo Connessioni
+        </div>
+        {res.connections.map((c, i) => (
+          <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 12px', borderRadius: 6, marginBottom: 4, background: c.gravity ? '#0d1f17' : '#1f0d0d', outline: '1px solid ' + (c.gravity ? '#1a3d2d' : '#3d1a1a') }}>
+            <span style={{ ...mono, fontSize: 12, color: C.text }}>{c.nome}</span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              {!c.gravity && c.head > 0 && <span style={{ ...mono, fontSize: 11, color: C.red }}>{'H = ' + fmt(c.head, 2) + ' m'}</span>}
+              <StatusBadge ok={c.gravity} label={c.gravity ? 'GRAVITA' : 'POMPA'} />
+            </div>
+          </div>
+        ))}
+        {res.connections.some(c => !c.gravity) && (
+          <div style={{ ...mono, fontSize: 11, color: C.amber, marginTop: 10, padding: '8px 12px', background: '#1f1800', borderRadius: 6, outline: '1px solid ' + C.amber }}>
+            {res.connections.filter(c => !c.gravity).map(c => '⚠ ' + c.note).join('  |  ')}
+          </div>
+        )}
+      </Card>
+    </div>
+  );
+}
+
+// ============================================================
 // NAVIGAZIONE
 // ============================================================
 
@@ -1953,6 +2233,7 @@ const SECTIONS = [
   { id: 'portate', label: 'Portate', icon: '≋', accent: C.blue },
   { id: 'omogen', label: 'Omogenizzazione', icon: '◉', accent: C.purple },
   { id: 'denitri', label: 'Denitrificazione', icon: '⬡', accent: C.amber },
+  { id: 'profilo', label: 'Profilo Idraulico', icon: '⇅', accent: C.blue },
   { id: 'sbr', label: 'Reattori SBR', icon: '▦', accent: C.green },
   { id: 'disinf', label: 'Disinfezione', icon: '✦', accent: C.red },
   { id: 'idraul', label: 'Idraulica', icon: '⇢', accent: C.blue },
@@ -1974,18 +2255,27 @@ export default function App() {
   });
 
   const [portate, setPortate] = useState<PortateState>({
-    modalita: 'AE',
-    AE: 1000,
-    Q_dir: 200,
-    Kd: 1.3,
-    Kh: 2.5,
-    override_Q: false,
-    Q_override: 0,
+    nr_loc: 3000,
+    qg: 100,
+    Kzi: 1.4,
+    Kor: 2.81,
     BOD5: NORM.AE.BOD5,
     COD: NORM.AE.COD,
     SST: NORM.AE.SST,
     N: NORM.AE.N,
     P: NORM.AE.P,
+  });
+
+  const [profilo, setProfilo] = useState<ProfiloIdraulicoState>({
+    quota_fondo_sx: -2.50,
+    altezza_utile_sx: 1.50,
+    quota_fondo_dx: -2.00,
+    altezza_utile_dx: 1.00,
+    sopraelevazione_dx: 0.00,
+    quota_fondo_sbr: 0.10,
+    quota_scarico: -0.50,
+    quota_arrivo_fognatura: -1.20,
+    quota_scarico_griglia: -0.80,
   });
 
   const [omogen, setOmogen] = useState<OmogenState>({
@@ -2000,6 +2290,7 @@ export default function App() {
     N_out_target: NORM.limiti.N_tot,
     n_mixer: 2,
     w_mixer: 4,
+    perc_denitri: 30,
   });
 
   const [sbr, setSbr] = useState<SBRState>({
@@ -2027,7 +2318,9 @@ export default function App() {
     connections: [],
   });
 
-  const Q_med = calcPortate(portate).Q_med;
+  const portateRes = calcPortate(portate);
+  const Q_med = portateRes.Q_zi_med;
+  const Q_or_max = portateRes.Q_or_max;
 
   return (
     <div style={{
@@ -2097,10 +2390,16 @@ export default function App() {
         {/* Footer sidebar */}
         <div style={{ padding: '12px 16px', borderTop: '1px solid ' + C.border }}>
           <div style={{ ...mono, fontSize: 10, color: C.textMid, marginBottom: 4 }}>
-            Q med
+            Q zi,med
           </div>
           <div style={{ ...mono, fontSize: 16, fontWeight: 700, color: C.blue }}>
             {fmt(Q_med, 1) + ' m3/g'}
+          </div>
+          <div style={{ ...mono, fontSize: 10, color: C.textMid, marginBottom: 4, marginTop: 6 }}>
+            Q or,max
+          </div>
+          <div style={{ ...mono, fontSize: 14, fontWeight: 700, color: C.amber }}>
+            {fmt(Q_or_max, 2) + ' m3/h'}
           </div>
         </div>
       </div>
@@ -2114,22 +2413,25 @@ export default function App() {
           <Portate p={portate} setP={setPortate} />
         )}
         {activeSection === 'omogen' && (
-          <Omogenizzazione o={omogen} setO={setOmogen} Q_med={Q_med} />
+          <Omogenizzazione o={omogen} setO={setOmogen} Q_med={Q_med} profilo={profilo} />
         )}
         {activeSection === 'denitri' && (
-          <Denitrificazione d={denitri} setD={setDenitri} Q_med={Q_med} N_in={portate.N} />
+          <Denitrificazione d={denitri} setD={setDenitri} Q_med={Q_med} N_in={portate.N} profilo={profilo} />
+        )}
+        {activeSection === 'profilo' && (
+          <ProfiloIdraulico pf={profilo} setPf={setProfilo} />
         )}
         {activeSection === 'sbr' && (
           <SBR s={sbr} setS={setSbr} Q_med={Q_med} BOD5_in={portate.BOD5} />
         )}
         {activeSection === 'disinf' && (
-          <Disinfezione d={disinf} setD={setDisinf} Q_med={Q_med} />
+          <Disinfezione d={disinf} setD={setDisinf} Q_med={Q_or_max} />
         )}
         {activeSection === 'idraul' && (
           <IdraulicaSection
             omogen={omogen} denitri={denitri} sbr={sbr} disinf={disinf}
             idraul={idraul} setIdraul={setIdraul}
-            Q_calc={calcPortate(portate).Q_calc}
+            Q_calc={Q_or_max}
           />
         )}
         {activeSection === 'riepilogo' && (
@@ -2141,6 +2443,7 @@ export default function App() {
             sbr={sbr}
             disinf={disinf}
             idraul={idraul}
+            profilo={profilo}
           />
         )}
       </div>
