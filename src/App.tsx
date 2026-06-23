@@ -117,6 +117,29 @@ interface DisinfState {
   t_contatto: number;
 }
 
+interface NamolExcesState {
+  dims: DimsState;
+  t_stoccaggio: number;
+  c_ispessito: number;
+}
+
+interface TratareNamolState {
+  Q_filtro: number;
+  n_sacchi: number;
+  t_filtrazione: number;
+  efficienza_disidr: number;
+}
+
+interface ChimiceState {
+  tipo_precipitante: 'FeCl3' | 'PAC';
+  P_out_target: number;
+  rapporto_molare_fecl3: number;
+  rapporto_molare_pac: number;
+  c_commerciale_fecl3: number;
+  c_commerciale_pac: number;
+  c_NaOCl_commerciale: number;
+}
+
 interface ProfiloIdraulicoState {
   quota_fondo_sx: number;
   altezza_utile_sx: number;
@@ -293,6 +316,50 @@ function calcDisinf(d: DisinfState, Q_med: number) {
   const consumo_giornaliero = consumo_orario * 24;
   const consumo_annuo = consumo_giornaliero * 365;
   return { V_fisico, CT, V_necessario, HRT_eff, consumo_orario, consumo_giornaliero, consumo_annuo };
+}
+
+function calcNamolExces(n: NamolExcesState, Px: number, V_omogen_fisico: number, superficie_sx: number, altezza_utile_sx: number) {
+  const V_fisico = calcVol(n.dims.L, n.dims.l, n.dims.h);
+  const Q_fango_giorno = safeDiv(Px, n.c_ispessito);
+  const V_necessario = Q_fango_giorno * n.t_stoccaggio;
+  const t_eff = safeDiv(V_fisico, Q_fango_giorno);
+  const V_disponibile_sx = superficie_sx * altezza_utile_sx - V_omogen_fisico;
+  return { V_fisico, Q_fango_giorno, V_necessario, t_eff, V_disponibile_sx };
+}
+
+function calcTratareNamol(t: TratareNamolState, Q_fango_giorno: number, Px: number) {
+  const Q_fango_tot_L = Q_fango_giorno * 1000;
+  const Q_filtro_tot = t.Q_filtro * t.n_sacchi * t.t_filtrazione;
+  const portataOk = Q_filtro_tot >= Q_fango_tot_L;
+  const Massa_pannelli = safeDiv(Px, t.efficienza_disidr / 100);
+  const V_pannelli = Massa_pannelli / 1000;
+  const freq_sostituzione = t.n_sacchi > 0 ? Math.round(30 / t.n_sacchi) : 0;
+  return { Q_fango_tot_L, Q_filtro_tot, portataOk, Massa_pannelli, V_pannelli, freq_sostituzione };
+}
+
+function calcChimice(c: ChimiceState, P_in: number, Q_zi_med: number, c_cloro: number) {
+  const Cl_attivo_giorno = Q_zi_med * c_cloro / 1000;
+  const Vol_NaOCl_giorno = safeDiv(Cl_attivo_giorno, (c.c_NaOCl_commerciale / 100) * 1.1);
+  const Vol_NaOCl_mese = Vol_NaOCl_giorno * 30;
+  const Vol_NaOCl_anno = Vol_NaOCl_giorno * 365;
+  const dP = P_in - c.P_out_target;
+  const dPOk = dP > 0;
+  const PtargetOk = c.P_out_target <= NORM.limiti.P_tot;
+  const P_da_rimuovere = Q_zi_med * Math.max(dP, 0) / 1000;
+  let Dose_giorno = NaN;
+  let Vol_sol_giorno = NaN;
+  if (c.tipo_precipitante === 'FeCl3') {
+    Dose_giorno = P_da_rimuovere * c.rapporto_molare_fecl3 * 162.2 / 31;
+    Vol_sol_giorno = safeDiv(Dose_giorno, (c.c_commerciale_fecl3 / 100) * 1.4);
+  } else {
+    const Dose_Al = P_da_rimuovere * c.rapporto_molare_pac * 27 / 31;
+    Dose_giorno = Dose_Al * 342 / (2 * 27);
+    Vol_sol_giorno = safeDiv(Dose_giorno, (c.c_commerciale_pac / 100) * 1.3);
+  }
+  const Vol_sol_mese = Vol_sol_giorno * 30;
+  const Vol_sol_anno = Vol_sol_giorno * 365;
+  const serbatoio_m3 = Vol_sol_giorno * 30 / 1000;
+  return { Cl_attivo_giorno, Vol_NaOCl_giorno, Vol_NaOCl_mese, Vol_NaOCl_anno, dP, dPOk, PtargetOk, P_da_rimuovere, Dose_giorno, Vol_sol_giorno, Vol_sol_mese, Vol_sol_anno, serbatoio_m3 };
 }
 
 function calcProfilo(pf: ProfiloIdraulicoState) {
@@ -823,6 +890,29 @@ function VerifyBox({ checks, title }: { checks: { label: string; ok: boolean }[]
   );
 }
 
+function WarnBox({ warnings }: { warnings: string[] }) {
+  if (!warnings.length) return null;
+  return (
+    <div style={{
+      borderRadius: 8,
+      padding: 14,
+      background: '#1f1800',
+      marginTop: 8,
+      outline: '1px solid ' + C.amber,
+    }}>
+      <div style={{ ...mono, fontSize: 12, fontWeight: 700, color: C.amber, letterSpacing: '0.1em', marginBottom: 8 }}>
+        {'⚠ AVVISI'}
+      </div>
+      {warnings.map((w, i) => (
+        <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: 4 }}>
+          <span style={{ color: C.amber, fontSize: 12, flexShrink: 0 }}>{'⚠'}</span>
+          <span style={{ ...mono, fontSize: 12, color: C.amber }}>{w}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function StatusBadge({ ok, label }: { ok: boolean; label?: string }) {
   return (
     <span style={{
@@ -1043,11 +1133,12 @@ function Omogenizzazione({ o, setO, Q_med, profilo }: { o: OmogenState; setO: (v
   const perc_utilizzo = safeDiv(res.V_necessario, V_disponibile_sx) * 100;
   const utilizzoOk = perc_utilizzo <= 100;
   const checks = [
-    { label: 'V fisico >= V necessario (' + fmt(res.V_necessario, 1) + ' m3)', ok: vOk },
     { label: 'HRT: 2 <= ' + fmt(res.HRT, 1) + ' h <= 8', ok: hrtOk },
     { label: 'P mixer: 1 <= ' + fmt(res.P_per_mixer, 2) + ' kW <= 15', ok: pOk },
-    { label: 'Utilizzo vasca sx <= 100% (' + fmt(perc_utilizzo, 1) + '%)', ok: utilizzoOk },
   ];
+  const warnings: string[] = !utilizzoOk
+    ? ['Volume fisico supera lo spazio assegnato nella vasca sinistra. Rivedere suddivisione nel Profilo Idraulico.']
+    : [];
   return (
     <div>
       <SectionTitle accent={C.purple}>Omogenizzazione</SectionTitle>
@@ -1076,6 +1167,7 @@ function Omogenizzazione({ o, setO, Q_med, profilo }: { o: OmogenState; setO: (v
         <ResultRow label="P mixer totale" value={fmt(res.P_mixer_tot, 2)} unit="kW" />
         <ResultRow label="P per mixer" value={fmt(res.P_per_mixer, 2)} unit="kW" ok={pOk} sub="range: 1 - 15 kW" />
         <VerifyBox checks={checks} title="Omogenizzazione" />
+        <WarnBox warnings={warnings} />
       </Card>
     </div>
   );
@@ -1097,8 +1189,10 @@ function Denitrificazione({ d, setD, Q_med, N_in, profilo }: { d: DenitriState; 
     { label: 'HRT: 1 <= ' + fmt(res.HRT, 1) + ' h <= 4', ok: hrtOk },
     { label: 'dN > 0 (' + fmt(res.dN, 1) + ' mg/L)', ok: dNOk },
     { label: 'P mixer: 1 <= ' + fmt(res.P_per_mixer, 2) + ' kW <= 15', ok: pOk },
-    { label: 'V fisico <= V disponibile (' + fmt(V_denitri_disponibile, 1) + ' m3)', ok: vDispOk },
   ];
+  const warnings: string[] = !vDispOk
+    ? ['Volume fisico supera lo spazio del compartimento denitrificazione. Aumentare % vasca dx o sopraelevazione nel Profilo Idraulico.']
+    : [];
   return (
     <div>
       <SectionTitle accent={C.amber}>Denitrificazione</SectionTitle>
@@ -1130,6 +1224,7 @@ function Denitrificazione({ d, setD, Q_med, N_in, profilo }: { d: DenitriState; 
         <ResultRow label="P mixer totale" value={fmt(res.P_mixer_tot, 2)} unit="kW" />
         <ResultRow label="P per mixer" value={fmt(res.P_per_mixer, 2)} unit="kW" ok={pOk} sub="range: 1 - 15 kW" />
         <VerifyBox checks={checks} title="Denitrificazione" />
+        <WarnBox warnings={warnings} />
       </Card>
     </div>
   );
@@ -1422,6 +1517,218 @@ function Disinfezione({ d, setD, Q_med }: { d: DisinfState; setD: (v: DisinfStat
 // ============================================================
 
 // ============================================================
+// SEZIONE: NAMOL EXCES
+// ============================================================
+
+function NamolExces({ n, setN, Px, V_omogen_fisico, profilo }: {
+  n: NamolExcesState;
+  setN: (v: NamolExcesState) => void;
+  Px: number;
+  V_omogen_fisico: number;
+  profilo: ProfiloIdraulicoState;
+}) {
+  const res = calcNamolExces(n, Px, V_omogen_fisico, 92, profilo.altezza_utile_sx);
+  const vOk = res.V_fisico >= res.V_necessario;
+  const tOk = res.t_eff >= 7;
+  const spazioOk = res.V_fisico <= Math.max(res.V_disponibile_sx, 0);
+  const checks = [
+    { label: 'V fisico >= V necessario (' + fmt(res.V_necessario, 1) + ' m3)', ok: vOk },
+    { label: 'Stoccaggio effettivo >= 7 gg (' + fmt(res.t_eff, 1) + ' gg)', ok: tOk },
+  ];
+  const warnings: string[] = !spazioOk
+    ? ['Volume supera lo spazio residuo nella vasca sinistra. Rivedere suddivisione o sopraelevare.']
+    : [];
+  return (
+    <div>
+      <SectionTitle accent={C.amber}>Nămol Exces — Stoccaggio Fango</SectionTitle>
+      <Card>
+        <div style={{ ...mono, fontSize: 11, color: C.textMid, marginBottom: 10, padding: '8px 12px', background: '#0d1117', borderRadius: 6, borderLeft: '3px solid ' + C.amber }}>
+          {'Px proveniente dal modulo SBR: ' + fmt(Px, 2) + ' kgSS/giorno'}
+        </div>
+        <div style={{ ...mono, fontSize: 11, color: C.textMid, marginBottom: 8, textTransform: 'uppercase' as const, letterSpacing: '0.05em' }}>
+          Dimensioni Vasca Fango
+        </div>
+        <DimInput dims={n.dims} onChange={d => setN({ ...n, dims: d })} />
+      </Card>
+      <Card>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+          <NumInput label="Giorni stoccaggio" value={n.t_stoccaggio} unit="gg" step={1} hint="5-20 gg" onChange={v => setN({ ...n, t_stoccaggio: v })} />
+          <NumInput label="Conc. fango ispessito" value={n.c_ispessito} unit="g/L" step={0.5} hint="10-25 g/L" onChange={v => setN({ ...n, c_ispessito: v })} />
+        </div>
+      </Card>
+      <Card>
+        <div style={{ ...mono, fontSize: 11, color: C.textMid, marginBottom: 10, textTransform: 'uppercase' as const, letterSpacing: '0.05em' }}>
+          Risultati
+        </div>
+        <ResultRow label="V fisico" value={fmt(res.V_fisico, 1)} unit="m3" highlight />
+        <ResultRow label="Prod. fango giornaliera (Px / c_ispessito)" value={fmt(res.Q_fango_giorno, 3)} unit="m3/g" />
+        <ResultRow label={'V necessario per ' + n.t_stoccaggio + ' giorni'} value={fmt(res.V_necessario, 1)} unit="m3" ok={vOk} />
+        <ResultRow label="Giorni stoccaggio effettivi" value={fmt(res.t_eff, 1)} unit="gg" ok={tOk} sub="minimo 7 gg" />
+        <ResultRow label="Spazio residuo vasca sx (dopo omogen)" value={fmt(res.V_disponibile_sx, 1)} unit="m3" ok={spazioOk} />
+        <VerifyBox checks={checks} title="Namol Exces" />
+        <WarnBox warnings={warnings} />
+      </Card>
+    </div>
+  );
+}
+
+// ============================================================
+// SEZIONE: TRATARE NAMOL
+// ============================================================
+
+function TratareNamol({ t, setT, Q_fango_giorno, Px }: {
+  t: TratareNamolState;
+  setT: (v: TratareNamolState) => void;
+  Q_fango_giorno: number;
+  Px: number;
+}) {
+  const res = calcTratareNamol(t, Q_fango_giorno, Px);
+  const portataOk = res.portataOk;
+  const sacchiOk = t.n_sacchi >= 1;
+  const checks = [
+    { label: 'Capacita filtrante >= fango da trattare (' + fmt(res.Q_fango_tot_L, 0) + ' L/g)', ok: portataOk },
+    { label: 'N sacchi >= 1', ok: sacchiOk },
+  ];
+  return (
+    <div>
+      <SectionTitle accent={C.amber}>Tratare Nămol — Filtro a Sacchi</SectionTitle>
+      <Card>
+        <div style={{ ...mono, fontSize: 11, color: C.textMid, marginBottom: 12, padding: '8px 12px', background: '#0d1117', borderRadius: 6, borderLeft: '3px solid ' + C.amber }}>
+          {'Il filtro a sacchi e adatto per portate fino a 2000 L/h. Per produzioni maggiori valutare nastropressa o centrifuga. I pannelli disidratati devono essere smaltiti come rifiuto speciale (cod. CER 190805).'}
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+          <NumInput label="Portata filtro" value={t.Q_filtro} unit="L/h" step={50} hint="tipico: 500" onChange={v => setT({ ...t, Q_filtro: v })} />
+          <NumInput label="N sacchi" value={t.n_sacchi} unit="" step={1} min={1} onChange={v => setT({ ...t, n_sacchi: Math.max(1, Math.round(v)) })} />
+          <NumInput label="Ore filtrazione/giorno" value={t.t_filtrazione} unit="h/g" step={0.5} hint="tipico: 4" onChange={v => setT({ ...t, t_filtrazione: v })} />
+          <NumInput label="Solidi pannello essiccato" value={t.efficienza_disidr} unit="%" step={1} hint="tipico: 20%" onChange={v => setT({ ...t, efficienza_disidr: v })} />
+        </div>
+      </Card>
+      <Card>
+        <div style={{ ...mono, fontSize: 11, color: C.textMid, marginBottom: 10, textTransform: 'uppercase' as const, letterSpacing: '0.05em' }}>
+          Risultati
+        </div>
+        <ResultRow label="Fango da trattare" value={fmt(res.Q_fango_tot_L, 0)} unit="L/g" highlight />
+        <ResultRow label="Capacita filtrante totale" value={fmt(res.Q_filtro_tot, 0)} unit="L/g" ok={portataOk} />
+        <ResultRow label="Massa pannelli prodotti" value={fmt(res.Massa_pannelli, 2)} unit="kg/g" highlight />
+        <ResultRow label="Volume pannelli" value={fmt(res.V_pannelli, 3)} unit="m3/g" />
+        <ResultRow label="Frequenza sostituzione sacchi (indicativa)" value={String(res.freq_sostituzione)} unit="giorni" sub="= 30 / n_sacchi" />
+        <VerifyBox checks={checks} title="Tratare Namol" />
+      </Card>
+    </div>
+  );
+}
+
+// ============================================================
+// SEZIONE: SUBSTANTE CHIMICE
+// ============================================================
+
+function SubstanteChimice({ c, setC, P_in, Q_zi_med, c_cloro }: {
+  c: ChimiceState;
+  setC: (v: ChimiceState) => void;
+  P_in: number;
+  Q_zi_med: number;
+  c_cloro: number;
+}) {
+  const res = calcChimice(c, P_in, Q_zi_med, c_cloro);
+  const checks = [
+    { label: 'dP > 0 (P_in - P_target = ' + fmt(res.dP, 2) + ' mg/L)', ok: res.dPOk },
+    { label: 'P target <= ' + NORM.limiti.P_tot + ' mg/L (limite NTPA)', ok: res.PtargetOk },
+  ];
+  return (
+    <div>
+      <SectionTitle accent={C.purple}>Substante Chimice — Dosaggi</SectionTitle>
+
+      {/* Sezione A: NaOCl */}
+      <Card>
+        <div style={{ ...mono, fontSize: 11, color: C.textMid, marginBottom: 10, textTransform: 'uppercase' as const, letterSpacing: '0.05em' }}>
+          A — NaOCl Disinfezione
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+          <NumInput label="Conc. soluzione commerciale" value={c.c_NaOCl_commerciale} unit="%" step={1} hint="tipico: 12%" onChange={v => setC({ ...c, c_NaOCl_commerciale: v })} />
+          <div>
+            <div style={{ ...mono, fontSize: 11, color: C.textMid, marginBottom: 4, textTransform: 'uppercase' as const, letterSpacing: '0.05em' }}>
+              Dose Cl attivo (da Disinfezione)
+            </div>
+            <div style={{ ...mono, fontSize: 14, fontWeight: 600, color: C.text, padding: '6px 10px', background: '#0d1117', borderRadius: 6, outline: '1px solid ' + C.border }}>
+              {fmt(c_cloro, 2) + ' mg/L'}
+            </div>
+          </div>
+        </div>
+        <div style={{ marginTop: 10 }}>
+          <ResultRow label="Cl attivo giornaliero" value={fmt(res.Cl_attivo_giorno, 3)} unit="kg/g" highlight />
+          <ResultRow label="Volume NaOCl 12% (giornaliero)" value={fmt(res.Vol_NaOCl_giorno, 2)} unit="L/g" />
+          <ResultRow label="Volume NaOCl (mensile)" value={fmt(res.Vol_NaOCl_mese, 1)} unit="L/mese" />
+          <ResultRow label="Volume NaOCl (annuo)" value={fmt(res.Vol_NaOCl_anno / 1000, 2)} unit="m3/anno" highlight />
+        </div>
+      </Card>
+
+      {/* Sezione B: Precipitazione P */}
+      <Card>
+        <div style={{ ...mono, fontSize: 11, color: C.textMid, marginBottom: 10, textTransform: 'uppercase' as const, letterSpacing: '0.05em' }}>
+          B — Precipitazione Fosforo
+        </div>
+        <div style={{ display: 'flex', gap: 6, marginBottom: 14 }}>
+          {(['FeCl3', 'PAC'] as const).map(tipo => (
+            <button
+              key={tipo}
+              onClick={() => setC({ ...c, tipo_precipitante: tipo })}
+              style={{
+                ...mono, padding: '7px 16px', borderRadius: 6, cursor: 'pointer',
+                background: c.tipo_precipitante === tipo ? '#1c2a3d' : '#0d1117',
+                borderTop: c.tipo_precipitante === tipo ? '2px solid ' + C.blue : '1px solid ' + C.border,
+                borderRight: c.tipo_precipitante === tipo ? '2px solid ' + C.blue : '1px solid ' + C.border,
+                borderBottom: c.tipo_precipitante === tipo ? '2px solid ' + C.blue : '1px solid ' + C.border,
+                borderLeft: c.tipo_precipitante === tipo ? '2px solid ' + C.blue : '1px solid ' + C.border,
+                color: c.tipo_precipitante === tipo ? C.blue : C.textMid,
+                fontSize: 13, fontWeight: c.tipo_precipitante === tipo ? 700 : 400,
+              }}
+            >
+              {tipo}
+            </button>
+          ))}
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+          <NumInput
+            label="P out target"
+            value={c.P_out_target}
+            unit="mg/L"
+            step={0.1}
+            hint={'limite NTPA: ' + NORM.limiti.P_tot + ' mg/L'}
+            onChange={v => setC({ ...c, P_out_target: v })}
+          />
+          <NumInput
+            label={'Rapporto molare Me:P (' + c.tipo_precipitante + ')'}
+            value={c.tipo_precipitante === 'FeCl3' ? c.rapporto_molare_fecl3 : c.rapporto_molare_pac}
+            step={0.1}
+            hint={c.tipo_precipitante === 'FeCl3' ? 'tipico: 2.0' : 'tipico: 1.5'}
+            onChange={v => setC(c.tipo_precipitante === 'FeCl3' ? { ...c, rapporto_molare_fecl3: v } : { ...c, rapporto_molare_pac: v })}
+          />
+          <NumInput
+            label={'Conc. commerciale ' + c.tipo_precipitante}
+            value={c.tipo_precipitante === 'FeCl3' ? c.c_commerciale_fecl3 : c.c_commerciale_pac}
+            unit="%"
+            step={1}
+            hint={c.tipo_precipitante === 'FeCl3' ? 'tipico: 40%' : 'tipico: 17%'}
+            onChange={v => setC(c.tipo_precipitante === 'FeCl3' ? { ...c, c_commerciale_fecl3: v } : { ...c, c_commerciale_pac: v })}
+          />
+        </div>
+        <div style={{ marginTop: 10 }}>
+          <ResultRow label="P in ingresso" value={fmt(P_in, 2)} unit="mg/L" />
+          <ResultRow label={'dP da rimuovere'} value={fmt(res.dP, 2)} unit="mg/L" ok={res.dPOk} />
+          <ResultRow label="P da rimuovere" value={fmt(res.P_da_rimuovere, 3)} unit="kg/g" />
+          <ResultRow label={'Dose ' + c.tipo_precipitante + ' (giornaliera)'} value={fmt(res.Dose_giorno, 2)} unit="kg/g" highlight />
+          <ResultRow label={'Volume soluzione (giornaliero)'} value={fmt(res.Vol_sol_giorno, 2)} unit="L/g" />
+          <ResultRow label={'Volume soluzione (mensile)'} value={fmt(res.Vol_sol_mese, 1)} unit="L/mese" />
+          <ResultRow label={'Volume soluzione (annuo)'} value={fmt(res.Vol_sol_anno / 1000, 2)} unit="m3/anno" />
+          <ResultRow label="Serbatoio stoccaggio 30 gg" value={fmt(res.serbatoio_m3, 2)} unit="m3" highlight />
+        </div>
+        <VerifyBox checks={checks} title={'Chimice — ' + c.tipo_precipitante} />
+      </Card>
+    </div>
+  );
+}
+
+// ============================================================
 // REPORT HTML
 // ============================================================
 
@@ -1665,7 +1972,7 @@ function generateReport(
 }
 
 function Riepilogo({
-  dati, portate, omogen, denitri, sbr, disinf, idraul, profilo,
+  dati, portate, omogen, denitri, sbr, disinf, idraul, profilo, namolExces, tratareNamol, chimice,
 }: {
   dati: DatiState;
   portate: PortateState;
@@ -1675,6 +1982,9 @@ function Riepilogo({
   disinf: DisinfState;
   idraul: IdraulicaState;
   profilo: ProfiloIdraulicoState;
+  namolExces: NamolExcesState;
+  tratareNamol: TratareNamolState;
+  chimice: ChimiceState;
 }) {
   function openReport() {
     const html = generateReport(dati, portate, omogen, denitri, sbr, disinf, idraul);
@@ -1686,13 +1996,16 @@ function Riepilogo({
   const dRes = calcDenitri(denitri, pRes.Q_zi_med, portate.N);
   const sRes = calcSBR(sbr, pRes.Q_zi_med, portate.BOD5);
   const diRes = calcDisinf(disinf, pRes.Q_or_max);
+  const nmRes = calcNamolExces(namolExces, sRes.Px, calcVol(omogen.dims.L, omogen.dims.l, omogen.dims.h), 92, profilo.altezza_utile_sx);
+  const tnRes = calcTratareNamol(tratareNamol, nmRes.Q_fango_giorno, sRes.Px);
+  const chRes = calcChimice(chimice, portate.P, pRes.Q_zi_med, disinf.c_cloro);
 
   const allChecks = [
-    { section: 'Omogen', label: 'V fisico >= V necessario', ok: oRes.V_fisico >= oRes.V_necessario },
     { section: 'Omogen', label: 'HRT 2 - 8 h', ok: oRes.HRT >= 2 && oRes.HRT <= 8 },
     { section: 'Omogen', label: 'P mixer 1 - 15 kW', ok: oRes.P_per_mixer >= 1 && oRes.P_per_mixer <= 15 },
     { section: 'Denitri', label: 'HRT 1 - 4 h', ok: dRes.HRT >= 1 && dRes.HRT <= 4 },
     { section: 'Denitri', label: 'dN > 0', ok: dRes.dN > 0 },
+    { section: 'Denitri', label: 'P mixer 1 - 15 kW', ok: dRes.P_per_mixer >= 1 && dRes.P_per_mixer <= 15 },
     { section: 'SBR', label: 'V singolo >= V bio/n', ok: sRes.V_singolo >= sRes.V_bio_per_reattore },
     { section: 'SBR', label: 'F/M 0.05 - 0.15', ok: sRes.FM >= NORM.bio.FM_min && sRes.FM <= NORM.bio.FM_max },
     { section: 'SBR', label: 'SRT 10 - 20 gg', ok: sbr.SRT >= NORM.bio.theta_c_min && sbr.SRT <= NORM.bio.theta_c_max },
@@ -1701,6 +2014,11 @@ function Riepilogo({
     { section: 'Disinf', label: 'CT >= 30 mg·min/L', ok: diRes.CT >= NORM.disinf.CT_min },
     { section: 'Disinf', label: 'c cloro >= 0.5 mg/L', ok: disinf.c_cloro >= NORM.disinf.cl_min },
     { section: 'Disinf', label: 'V fisico >= V necessario', ok: diRes.V_fisico >= diRes.V_necessario },
+    { section: 'Namol', label: 'Stoccaggio V >= V necessario', ok: nmRes.V_fisico >= nmRes.V_necessario },
+    { section: 'Namol', label: 'Stoccaggio >= 7 gg', ok: nmRes.t_eff >= 7 },
+    { section: 'Filtro', label: 'Capacita filtrante sufficiente', ok: tnRes.portataOk },
+    { section: 'Chimici', label: 'dP > 0 (P rimozione possibile)', ok: chRes.dPOk },
+    { section: 'Chimici', label: 'P target <= 2 mg/L (NTPA)', ok: chRes.PtargetOk },
   ];
 
   const nOk = allChecks.filter(c => c.ok).length;
@@ -1714,9 +2032,10 @@ function Riepilogo({
     { nome: 'Disinfezione', L: disinf.dims.L, l: disinf.dims.l, h: disinf.dims.h, V: diRes.V_fisico, n: 1 },
   ];
 
-  const sections = ['Omogen', 'Denitri', 'SBR', 'Disinf'];
+  const sections = ['Omogen', 'Denitri', 'SBR', 'Disinf', 'Namol', 'Filtro', 'Chimici'];
   const sectionColors: Record<string, string> = {
     'Omogen': C.purple, 'Denitri': C.amber, 'SBR': C.green, 'Disinf': C.red,
+    'Namol': C.amber, 'Filtro': C.amber, 'Chimici': C.purple,
   };
 
   return (
@@ -1901,6 +2220,10 @@ function Riepilogo({
           <ResultRow label="O2 trasferito" value={fmt(sRes.O2_trasferito, 2)} unit="kgO2/h" ok={sRes.O2_trasferito >= sRes.O2_richiesto} />
           <ResultRow label="CT disinfezione" value={fmt(diRes.CT, 1)} unit="mg·min/L" ok={diRes.CT >= NORM.disinf.CT_min} />
           <ResultRow label="Cloro annuo" value={fmt(diRes.consumo_annuo, 0)} unit="kg/anno" highlight />
+          <ResultRow label="Prod. fango (m3/g)" value={fmt(nmRes.Q_fango_giorno, 3)} unit="m3/g" />
+          <ResultRow label="Stoccaggio fango" value={fmt(nmRes.V_fisico, 1)} unit="m3" ok={nmRes.V_fisico >= nmRes.V_necessario} />
+          <ResultRow label="Consumo NaOCl" value={fmt(chRes.Vol_NaOCl_giorno, 2)} unit="L/g" />
+          <ResultRow label={'Consumo ' + chimice.tipo_precipitante} value={fmt(chRes.Vol_sol_giorno, 2)} unit="L/g" />
         </div>
       </Card>
     </div>
@@ -2411,10 +2734,13 @@ const SECTIONS = [
   { id: 'dati', label: 'Dati Generali', icon: '▣', accent: C.blue },
   { id: 'portate', label: 'Portate', icon: '≋', accent: C.blue },
   { id: 'omogen', label: 'Omogenizzazione', icon: '◉', accent: C.purple },
+  { id: 'namol_exces', label: 'Namol Exces', icon: '⊡', accent: C.amber },
+  { id: 'tratare_namol', label: 'Tratare Namol', icon: '⊟', accent: C.amber },
   { id: 'denitri', label: 'Denitrificazione', icon: '⬡', accent: C.amber },
   { id: 'profilo', label: 'Profilo Idraulico', icon: '⇅', accent: C.blue },
   { id: 'sbr', label: 'Reattori SBR', icon: '▦', accent: C.green },
   { id: 'disinf', label: 'Disinfezione', icon: '✦', accent: C.red },
+  { id: 'chimice', label: 'Substante Chimice', icon: '⬡', accent: C.purple },
   { id: 'idraul', label: 'Idraulica', icon: '⇢', accent: C.blue },
   { id: 'riepilogo', label: 'Riepilogo', icon: '≡', accent: C.blue },
 ];
@@ -2500,12 +2826,40 @@ export default function App() {
     connections: [],
   });
 
+  const [namolExces, setNamolExces] = useState<NamolExcesState>({
+    dims: { L: 4, l: 4, h: 3 },
+    t_stoccaggio: 10,
+    c_ispessito: 15,
+  });
+
+  const [tratareNamol, setTratareNamol] = useState<TratareNamolState>({
+    Q_filtro: 500,
+    n_sacchi: 2,
+    t_filtrazione: 4,
+    efficienza_disidr: 20,
+  });
+
+  const [chimice, setChimice] = useState<ChimiceState>({
+    tipo_precipitante: 'FeCl3',
+    P_out_target: 2,
+    rapporto_molare_fecl3: 2.0,
+    rapporto_molare_pac: 1.5,
+    c_commerciale_fecl3: 40,
+    c_commerciale_pac: 17,
+    c_NaOCl_commerciale: 12,
+  });
+
   const portateRes = calcPortate(portate);
   const Q_med = portateRes.Q_zi_med;
   const Q_or_max = portateRes.Q_or_max;
 
+  const sbrResGlobal = calcSBR(sbr, Q_med, portate.BOD5);
+  const Px_global = sbrResGlobal.Px;
+  const Q_fango_giorno_global = safeDiv(Px_global, namolExces.c_ispessito);
+  const V_omogen_fisico_global = calcVol(omogen.dims.L, omogen.dims.l, omogen.dims.h);
+
   const saveProject = () => {
-    const state = { dati, portate, omogen, denitri, sbr, disinf, profiloIdraulico: profilo, idraulica: idraul };
+    const state = { dati, portate, omogen, denitri, sbr, disinf, profiloIdraulico: profilo, idraulica: idraul, namolExces, tratareNamol, chimice };
     const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -2528,6 +2882,9 @@ export default function App() {
         if (s.disinf) setDisinf(s.disinf);
         if (s.profiloIdraulico) setProfilo(s.profiloIdraulico);
         if (s.idraulica) setIdraul(s.idraulica);
+        if (s.namolExces) setNamolExces(s.namolExces);
+        if (s.tratareNamol) setTratareNamol(s.tratareNamol);
+        if (s.chimice) setChimice(s.chimice);
       } catch (_) { /* ignore malformed JSON */ }
     };
     reader.readAsText(file);
@@ -2647,6 +3004,21 @@ export default function App() {
         {activeSection === 'omogen' && (
           <Omogenizzazione o={omogen} setO={setOmogen} Q_med={Q_med} profilo={profilo} />
         )}
+        {activeSection === 'namol_exces' && (
+          <NamolExces
+            n={namolExces} setN={setNamolExces}
+            Px={Px_global}
+            V_omogen_fisico={V_omogen_fisico_global}
+            profilo={profilo}
+          />
+        )}
+        {activeSection === 'tratare_namol' && (
+          <TratareNamol
+            t={tratareNamol} setT={setTratareNamol}
+            Q_fango_giorno={Q_fango_giorno_global}
+            Px={Px_global}
+          />
+        )}
         {activeSection === 'denitri' && (
           <Denitrificazione d={denitri} setD={setDenitri} Q_med={Q_med} N_in={portate.N} profilo={profilo} />
         )}
@@ -2658,6 +3030,14 @@ export default function App() {
         )}
         {activeSection === 'disinf' && (
           <Disinfezione d={disinf} setD={setDisinf} Q_med={Q_or_max} />
+        )}
+        {activeSection === 'chimice' && (
+          <SubstanteChimice
+            c={chimice} setC={setChimice}
+            P_in={portate.P}
+            Q_zi_med={Q_med}
+            c_cloro={disinf.c_cloro}
+          />
         )}
         {activeSection === 'idraul' && (
           <IdraulicaSection
@@ -2676,6 +3056,9 @@ export default function App() {
             disinf={disinf}
             idraul={idraul}
             profilo={profilo}
+            namolExces={namolExces}
+            tratareNamol={tratareNamol}
+            chimice={chimice}
           />
         )}
       </div>
