@@ -262,7 +262,7 @@ function calcDenitri(d: DenitriState, Q_med: number, N_in: number) {
 }
 
 function calcSBR(s: SBRState, Q_med: number, BOD5_in: number) {
-  const Q_bio = s.AE_biologico * NORM.AE.Q / 1000;
+  const Q_bio = Q_med;
   const V_singolo = calcVol(s.dims.L, s.dims.l, s.dims.h);
   const dBOD = BOD5_in - NORM.limiti.BOD5;
   const { Y, Kd } = NORM.bio;
@@ -1187,6 +1187,7 @@ function CycleBar({ s }: { s: SBRState }) {
 // ============================================================
 
 function SBR({ s, setS, Q_med, BOD5_in }: { s: SBRState; setS: (v: SBRState) => void; Q_med: number; BOD5_in: number }) {
+  const [showGuide, setShowGuide] = React.useState(false);
   const res = calcSBR(s, Q_med, BOD5_in);
   const vOk = res.V_singolo >= res.V_bio_per_reattore;
   const fmOk = res.FM >= NORM.bio.FM_min && res.FM <= NORM.bio.FM_max;
@@ -1250,10 +1251,18 @@ function SBR({ s, setS, Q_med, BOD5_in }: { s: SBRState; setS: (v: SBRState) => 
         </div>
       </Card>
       <Card>
-        <div style={{ ...mono, fontSize: 11, color: C.textMid, marginBottom: 10, textTransform: 'uppercase' as const, letterSpacing: '0.05em' }}>
-          Risultati Biologici
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+          <div style={{ ...mono, fontSize: 11, color: C.textMid, textTransform: 'uppercase' as const, letterSpacing: '0.05em' }}>
+            Risultati Biologici
+          </div>
+          <button
+            onClick={() => setShowGuide(!showGuide)}
+            style={{ ...mono, fontSize: 11, padding: '3px 10px', background: showGuide ? '#1c2a3d' : '#0d1117', borderRadius: 4, cursor: 'pointer', borderTop: 'none', borderRight: 'none', borderBottom: 'none', borderLeft: 'none', color: C.blue, outline: '1px solid ' + C.border }}
+          >
+            {'? Guida parametri'}
+          </button>
         </div>
-        <ResultRow label="Q biologico (AE x 200 L/g)" value={fmt(res.Q_bio, 1)} unit="m3/g" highlight />
+        <ResultRow label="Q biologico (= Q zi,med da Portate)" value={fmt(res.Q_bio, 1)} unit="m3/g" highlight />
         <ResultRow label="V singolo (scheda tecnica)" value={fmt(res.V_singolo, 1)} unit="m3" highlight />
         <ResultRow label="V necessario bio totale" value={fmt(res.V_necessario_bio, 1)} unit="m3" />
         <ResultRow label="V bio per reattore" value={fmt(res.V_bio_per_reattore, 1)} unit="m3" ok={vOk} />
@@ -1269,6 +1278,87 @@ function SBR({ s, setS, Q_med, BOD5_in }: { s: SBRState; setS: (v: SBRState) => 
         <ResultRow label="O2 richiesto" value={fmt(res.O2_richiesto, 2)} unit="kgO2/h" />
         <VerifyBox checks={checks} title="Reattori SBR" />
       </Card>
+      {showGuide && (
+        <Card>
+          <div style={{ ...mono, fontSize: 11, color: C.textMid, marginBottom: 14, textTransform: 'uppercase' as const, letterSpacing: '0.05em' }}>
+            Guida ai Parametri Biologici
+          </div>
+          {[
+            {
+              nome: 'F/M — Rapporto Cibo/Microrganismi',
+              simbolo: 'F/M', unita: 'kgBOD5/kgMLSS·g',
+              desc: 'Quantita di substrato organico disponibile per unita di biomassa. Troppo alto = fango non sedimenta. Troppo basso = batteri affamati.',
+              range: '0.05 – 0.15',
+              val: fmt(res.FM, 4),
+              ok: fmOk,
+            },
+            {
+              nome: 'MLSS — Solidi Sospesi nel Liquame Misto',
+              simbolo: 'MLSS', unita: 'mg/L',
+              desc: 'Concentrazione totale di fango nel reattore (batteri vivi + materia inerte). Determina la capacita depurativa per unita di volume.',
+              range: '2500 – 4500 mg/L',
+              val: String(s.MLSS),
+              ok: mlssOk,
+            },
+            {
+              nome: 'MLVSS — Frazione Volatile dei Solidi Sospesi',
+              simbolo: 'MLVSS', unita: 'mg/L',
+              desc: 'Parte biologicamente attiva del fango (solo batteri vivi). Tipicamente 70-80% di MLSS. Calcolato come MLSS x 0.75.',
+              range: 'informativo',
+              val: fmt(res.MLVSS, 0),
+              ok: undefined,
+            },
+            {
+              nome: 'SRT — Eta del Fango (Sludge Retention Time)',
+              simbolo: 'SRT', unita: 'giorni',
+              desc: 'Tempo medio di permanenza dei batteri nel sistema. SRT alto favorisce la nitrificazione ma produce meno fango in eccesso.',
+              range: '10 – 20 giorni',
+              val: String(s.SRT),
+              ok: srtOk,
+            },
+            {
+              nome: 'O2 — Verifica Capacita di Aerazione',
+              simbolo: 'O2 trasfert. / O2 rich.', unita: 'kgO2/h',
+              desc: 'I diffusori devono fornire piu ossigeno di quanto ne consuma il processo. Se O2 trasferito < O2 richiesto: aumentare N diffusori o portata aria.',
+              range: 'O2 trasferito >= O2 richiesto',
+              val: fmt(res.O2_trasferito, 2) + ' / ' + fmt(res.O2_richiesto, 2),
+              ok: o2Ok,
+            },
+            {
+              nome: 'Px — Produzione Giornaliera di Fango in Eccesso',
+              simbolo: 'Px', unita: 'kgSS/g',
+              desc: 'Fango prodotto ogni giorno dal processo biologico. Deve essere estratto dal sistema per mantenere il SRT desiderato.',
+              range: 'informativo',
+              val: fmt(res.Px, 2),
+              ok: undefined,
+            },
+            {
+              nome: 'V_bio — Volume Biologicamente Necessario',
+              simbolo: 'V_necessario', unita: 'm3',
+              desc: 'Volume minimo calcolato dalla formula biologica per garantire la rimozione del BOD5. V singolo deve essere >= V_bio per reattore.',
+              range: 'V singolo >= V_bio / N_reattori',
+              val: fmt(res.V_necessario_bio, 1) + ' tot / ' + fmt(res.V_bio_per_reattore, 1) + ' per reattore',
+              ok: vOk,
+            },
+          ].map((item, i) => (
+            <div key={i} style={{ marginBottom: 12, padding: '10px 14px', borderRadius: 6, background: '#0d1117', outline: '1px solid ' + (item.ok === undefined ? C.border : item.ok ? '#1a3d2d' : '#3d1a1a') }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 4 }}>
+                <div>
+                  <span style={{ ...mono, fontSize: 12, fontWeight: 700, color: item.ok === undefined ? C.blue : item.ok ? C.green : C.red }}>{item.simbolo}</span>
+                  <span style={{ ...mono, fontSize: 10, color: C.textMid, marginLeft: 8 }}>{item.unita}</span>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <span style={{ ...mono, fontSize: 13, fontWeight: 700, color: item.ok === undefined ? C.text : item.ok ? C.green : C.red }}>{item.val}</span>
+                  {item.ok !== undefined && <StatusBadge ok={item.ok} label={item.ok ? 'OK' : 'NO'} />}
+                </div>
+              </div>
+              <div style={{ ...mono, fontSize: 11, fontWeight: 600, color: C.text, marginBottom: 3 }}>{item.nome}</div>
+              <div style={{ ...mono, fontSize: 11, color: C.textMid, lineHeight: 1.5 }}>{item.desc}</div>
+              <div style={{ ...mono, fontSize: 10, color: C.amber, marginTop: 4 }}>{'Range: ' + item.range}</div>
+            </div>
+          ))}
+        </Card>
+      )}
     </div>
   );
 }
@@ -1939,9 +2029,9 @@ function IdraulicaSection({
                     <td key={field} style={{ padding: '4px 8px' }}>
                       <input
                         type="number"
-                        step="0.1"
+                        step="0.01"
                         value={getOv(n.id, field as keyof NodeOverride)}
-                        onChange={e => setOverride(n.id, field as keyof NodeOverride, parseFloat(e.target.value) || 0)}
+                        onChange={e => { const v = parseFloat(e.target.value); if (!isNaN(v)) setOverride(n.id, field as keyof NodeOverride, v); }}
                         style={{ ...mono, width: 80, background: '#010409', borderRadius: 5, color: C.text, fontSize: 12, padding: '4px 6px', outline: '1px solid #30363d', borderTop: 'none', borderRight: 'none', borderBottom: 'none', borderLeft: 'none' }}
                       />
                     </td>
@@ -2103,10 +2193,11 @@ function IdraulicaSection({
 // ============================================================
 
 function ProfiloIdraulico({
-  pf, setPf,
+  pf, setPf, perc_denitri,
 }: {
   pf: ProfiloIdraulicoState;
   setPf: (v: ProfiloIdraulicoState) => void;
+  perc_denitri: number;
 }) {
   const res = calcProfilo(pf);
 
@@ -2125,6 +2216,9 @@ function ProfiloIdraulico({
   const TW_SX = 120;
   const TX_DX = 310;
   const TW_DX = 120;
+  const TW_DENITRI = Math.max(20, Math.round(TW_DX * perc_denitri / 100));
+  const TW_ACCUMULO = TW_DX - TW_DENITRI;
+  const TX_ACCUMULO = TX_DX + TW_DENITRI;
   const TX_SBR = 510;
   const TW_SBR = 130;
   const TX_SCARICO = 710;
@@ -2257,8 +2351,14 @@ function ProfiloIdraulico({
           {/* Connection 2: omogen -> denitri */}
           {connArrow(TX_SX + TW_SX, yPeloSx, TX_DX, yPeloSx, res.connections[1].gravity, res.connections[1].head, 'c2')}
 
-          {/* Right tank */}
-          {tankRect(TX_DX, TW_DX, pf.quota_fondo_dx, res.quota_pelo_dx, pf.quota_fondo_dx + res.altezza_totale_dx + 0.3, COL_WATER, 'Denitrificare', 'Accumulo')}
+          {/* Right tank — Compartimento A: Denitrificazione */}
+          {tankRect(TX_DX, TW_DENITRI, pf.quota_fondo_dx, res.quota_pelo_dx, pf.quota_fondo_dx + res.altezza_totale_dx + 0.3, COL_WATER, 'Denitrificare', String(perc_denitri) + '%')}
+
+          {/* Right tank — Compartimento B: Accumulo + Disinfezione */}
+          {tankRect(TX_ACCUMULO, TW_ACCUMULO, pf.quota_fondo_dx, res.quota_pelo_dx, pf.quota_fondo_dx + res.altezza_totale_dx + 0.3, '#1a6a9a', 'Accumulo', 'Disinf.')}
+
+          {/* Setto divisorio tratteggiato */}
+          <line x1={TX_ACCUMULO} y1={toY(pf.quota_fondo_dx + res.altezza_totale_dx + 0.3)} x2={TX_ACCUMULO} y2={toY(pf.quota_fondo_dx)} stroke={C.amber} strokeWidth="1.5" strokeDasharray="6,3" />
 
           {/* Accumulo level indicator */}
           <line x1={TX_DX} y1={yAccumulo} x2={TX_DX + TW_DX} y2={yAccumulo} stroke={C.amber} strokeWidth="1" strokeDasharray="4,2" />
@@ -2270,11 +2370,11 @@ function ProfiloIdraulico({
           {/* SBR module */}
           {tankRect(TX_SBR, TW_SBR, pf.quota_fondo_sbr, res.quota_pelo_sbr - 1.0, res.quota_pelo_sbr, COL_WATER, 'SBR', 'h=5.00 m')}
 
-          {/* Connection 4: SBR -> accumulo */}
-          {connArrow(TX_SBR, yFondoSbr, TX_DX + TW_DX, yAccumulo, res.connections[3].gravity, res.connections[3].head, 'c4')}
+          {/* Connection 4: SBR -> accumulo (compartimento B) */}
+          {connArrow(TX_SBR, yFondoSbr, TX_ACCUMULO + TW_ACCUMULO / 2, yAccumulo, res.connections[3].gravity, res.connections[3].head, 'c4')}
 
           {/* Connection 5: accumulo -> scarico */}
-          {connArrow(TX_DX + TW_DX / 2, yAccumulo, TX_SCARICO, toY(pf.quota_scarico), res.connections[4].gravity, res.connections[4].head, 'c5')}
+          {connArrow(TX_ACCUMULO + TW_ACCUMULO / 2, yAccumulo, TX_SCARICO, toY(pf.quota_scarico), res.connections[4].gravity, res.connections[4].head, 'c5')}
           <text x={TX_SCARICO + 4} y={toY(pf.quota_scarico) + 4} fill={COL_GROUND} fontSize="9" fontFamily="monospace">{'Scarico ' + fmt(pf.quota_scarico, 2) + ' m'}</text>
         </svg>
       </Card>
@@ -2325,6 +2425,7 @@ const SECTIONS = [
 
 export default function App() {
   const [activeSection, setActiveSection] = useState('dati');
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [dati, setDati] = useState<DatiState>({
     nome: 'Impianto SBR',
@@ -2402,6 +2503,35 @@ export default function App() {
   const portateRes = calcPortate(portate);
   const Q_med = portateRes.Q_zi_med;
   const Q_or_max = portateRes.Q_or_max;
+
+  const saveProject = () => {
+    const state = { dati, portate, omogen, denitri, sbr, disinf, profiloIdraulico: profilo, idraulica: idraul };
+    const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'progetto_sbr_' + (dati.nome || 'unnamed') + '_' + new Date().toISOString().slice(0, 10) + '.json';
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const loadProject = (file: File) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const s = JSON.parse(e.target?.result as string);
+        if (s.dati) setDati(s.dati);
+        if (s.portate) setPortate(s.portate);
+        if (s.omogen) setOmogen(s.omogen);
+        if (s.denitri) setDenitri(s.denitri);
+        if (s.sbr) setSbr(s.sbr);
+        if (s.disinf) setDisinf(s.disinf);
+        if (s.profiloIdraulico) setProfilo(s.profiloIdraulico);
+        if (s.idraulica) setIdraul(s.idraulica);
+      } catch (_) { /* ignore malformed JSON */ }
+    };
+    reader.readAsText(file);
+  };
 
   return (
     <div style={{
@@ -2482,6 +2612,27 @@ export default function App() {
           <div style={{ ...mono, fontSize: 14, fontWeight: 700, color: C.amber }}>
             {fmt(Q_or_max, 2) + ' m3/h'}
           </div>
+          <div style={{ marginTop: 14, display: 'flex', flexDirection: 'column' as const, gap: 6 }}>
+            <button
+              onClick={saveProject}
+              style={{ ...mono, fontSize: 11, padding: '7px 10px', background: '#0d1f17', borderRadius: 5, cursor: 'pointer', borderTop: 'none', borderRight: 'none', borderBottom: 'none', borderLeft: 'none', color: C.green, outline: '1px solid #1a3d2d', textAlign: 'left' as const }}
+            >
+              {'⬇  Salva progetto'}
+            </button>
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              style={{ ...mono, fontSize: 11, padding: '7px 10px', background: '#0d1520', borderRadius: 5, cursor: 'pointer', borderTop: 'none', borderRight: 'none', borderBottom: 'none', borderLeft: 'none', color: C.blue, outline: '1px solid #1a2d4a', textAlign: 'left' as const }}
+            >
+              {'⬆  Carica progetto'}
+            </button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".json"
+              style={{ display: 'none' }}
+              onChange={e => { if (e.target.files?.[0]) loadProject(e.target.files[0]); e.target.value = ''; }}
+            />
+          </div>
         </div>
       </div>
 
@@ -2500,7 +2651,7 @@ export default function App() {
           <Denitrificazione d={denitri} setD={setDenitri} Q_med={Q_med} N_in={portate.N} profilo={profilo} />
         )}
         {activeSection === 'profilo' && (
-          <ProfiloIdraulico pf={profilo} setPf={setProfilo} />
+          <ProfiloIdraulico pf={profilo} setPf={setProfilo} perc_denitri={denitri.perc_denitri} />
         )}
         {activeSection === 'sbr' && (
           <SBR s={sbr} setS={setSbr} Q_med={Q_med} BOD5_in={portate.BOD5} />
