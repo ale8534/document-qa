@@ -398,23 +398,24 @@ function calcProfilo(pf: ProfiloIdraulicoState) {
   const quota_pelo_dx = pf.quota_fondo_dx + altezza_totale_dx;
   const altezza_sbr = 5.0;
   const quota_pelo_sbr = pf.quota_fondo_sbr + altezza_sbr;
-  const quota_accumulo = quota_pelo_dx - altezza_totale_dx * 0.3;
 
   const c1g = pf.quota_scarico_griglia > quota_pelo_sx + 0.10;
   const c2g = quota_pelo_sx > quota_pelo_dx + 0.10;
   const c3g = quota_pelo_dx > pf.quota_fondo_sbr + 0.50;
-  const c4g = pf.quota_fondo_sbr > quota_accumulo + 0.10;
-  const c5g = pf.quota_scarico > quota_accumulo - 0.10;
+  const c4g = quota_pelo_sbr > quota_pelo_dx + 0.10;
+  const c5g = true; // Buffer and Disinf are communicating compartments of the same tank
+  const c6g = quota_pelo_dx > pf.quota_scarico + 0.10;
 
   const connections: ConnResult[] = [
     { nome: 'Griglia → Omogenizare', gravity: c1g, head: !c1g ? Math.max(0, quota_pelo_sx - pf.quota_scarico_griglia + 0.50) : 0, note: !c1g ? 'Franco insufficiente — verificare quota scarico griglia' : 'Deflusso per gravita' },
     { nome: 'Omogenizare → Denitrificare', gravity: c2g, head: !c2g ? Math.max(0, quota_pelo_dx - quota_pelo_sx + 0.50) : 0, note: !c2g ? 'Pelo libero sx inferiore a dx — pompa necessaria' : 'Deflusso per gravita' },
     { nome: 'Denitrificare → SBR', gravity: c3g, head: !c3g ? Math.max(0, pf.quota_fondo_sbr - quota_pelo_dx + 1.00) : 0, note: !c3g ? 'SBR fuori terra — pompa sollevamento necessaria' : 'Deflusso per gravita' },
-    { nome: 'SBR → Accumulo (decant)', gravity: c4g, head: !c4g ? Math.max(0, quota_accumulo - pf.quota_fondo_sbr + 0.50) : 0, note: !c4g ? 'Quota fondo SBR insufficiente — verificare sopraelevazione dx' : 'Deflusso per gravita' },
-    { nome: 'Accumulo → Scarico', gravity: c5g, head: !c5g ? Math.max(0, quota_accumulo - pf.quota_scarico + 0.50) : 0, note: !c5g ? 'Scarico troppo alto — verificare quota pelo ricettore' : 'Deflusso per gravita' },
+    { nome: 'SBR → Buffer SBR', gravity: c4g, head: !c4g ? Math.max(0, quota_pelo_dx - quota_pelo_sbr + 0.50) : 0, note: !c4g ? 'Pelo SBR inferiore al buffer — verificare quota fondo SBR' : 'Deflusso per gravita' },
+    { nome: 'Buffer SBR → Disinfezione', gravity: c5g, head: 0, note: 'Compartimenti comunicanti — stessa vasca' },
+    { nome: 'Disinfezione → Scarico', gravity: c6g, head: !c6g ? Math.max(0, pf.quota_scarico - quota_pelo_dx + 0.50) : 0, note: !c6g ? 'Scarico troppo alto — verificare quota pelo ricettore' : 'Deflusso per gravita' },
   ];
 
-  return { quota_pelo_sx, altezza_totale_dx, quota_pelo_dx, altezza_sbr, quota_pelo_sbr, quota_accumulo, connections };
+  return { quota_pelo_sx, altezza_totale_dx, quota_pelo_dx, altezza_sbr, quota_pelo_sbr, connections };
 }
 
 // ============================================================
@@ -476,9 +477,16 @@ function calcIdraulicaAll(connections: ConDef[], Q_m3h: number): ConResult[] {
   });
 }
 
+function getDefaultZFondo(nodeId: string): number {
+  if (nodeId.startsWith('sbr_')) return -0.10;
+  return -1.50;
+}
+
 function buildSceneNodes(
   omogen: OmogenState,
+  namolExces: NamolExcesState,
   denitri: DenitriState,
+  bufferSbr: BufferSBRState,
   sbr: SBRState,
   disinf: DisinfState,
   overrides: Record<string, NodeOverride>,
@@ -486,7 +494,9 @@ function buildSceneNodes(
   const gap = 2;
   const tanks: { id: string; nome: string; color: string; dims: DimsState }[] = [
     { id: 'omogen', nome: 'Omogen.', color: C.purple, dims: omogen.dims },
+    { id: 'namol_exces', nome: 'Namol Exces', color: C.amber, dims: namolExces.dims },
     { id: 'denitri', nome: 'Denitri.', color: C.amber, dims: denitri.dims },
+    { id: 'buffer_sbr', nome: 'Buffer SBR', color: C.blue, dims: bufferSbr.dims },
     ...Array.from({ length: sbr.n_reattori }, (_, i) => ({
       id: 'sbr_' + (i + 1),
       nome: 'SBR ' + (i + 1),
@@ -498,11 +508,12 @@ function buildSceneNodes(
   let curX = 0;
   return tanks.map(t => {
     const ov = overrides[t.id];
+    const defaultZ = getDefaultZFondo(t.id);
     const node: Scene3DNode = {
       id: t.id, nome: t.nome, color: t.color,
       x: ov ? ov.x : curX,
       y: ov ? ov.y : 0,
-      z: ov ? ov.z_fondo : 0,
+      z: ov ? ov.z_fondo : defaultZ,
       L: t.dims.L, l: t.dims.l, h: t.dims.h,
     };
     curX += t.dims.L + gap;
@@ -2447,7 +2458,7 @@ const CON_TIPO_COLOR: Record<ConTipo, string> = { condotta: C.blue, stramazzo: C
 
 function getAllNodeIds(n_reattori: number): string[] {
   return [
-    'omogen', 'denitri',
+    'omogen', 'namol_exces', 'denitri', 'buffer_sbr',
     ...Array.from({ length: n_reattori }, (_, i) => 'sbr_' + (i + 1)),
     'disinf',
   ];
@@ -2455,7 +2466,9 @@ function getAllNodeIds(n_reattori: number): string[] {
 
 function getNodeLabel(id: string): string {
   if (id === 'omogen') return 'Omogenizzazione';
+  if (id === 'namol_exces') return 'Namol Exces';
   if (id === 'denitri') return 'Denitrificazione';
+  if (id === 'buffer_sbr') return 'Buffer SBR';
   if (id === 'disinf') return 'Disinfezione';
   if (id.startsWith('sbr_')) return 'SBR ' + id.slice(4);
   return id;
@@ -2468,14 +2481,32 @@ const DEFAULT_CON: Omit<ConDef, 'id' | 'from' | 'to'> = {
   z_fin: 0.0, h_fin: 0.5, b_fin: 1.0,
 };
 
+function NodeFieldInput({ value, onCommit }: { value: number; onCommit: (v: number) => void }) {
+  const [str, setStr] = React.useState(String(value));
+  React.useEffect(() => { setStr(String(value)); }, [value]);
+  return (
+    <input
+      type="number"
+      step="0.01"
+      value={str}
+      onChange={e => {
+        setStr(e.target.value);
+        const v = parseFloat(e.target.value);
+        if (!isNaN(v)) onCommit(v);
+      }}
+      style={{ fontFamily: "'SF Mono', 'Fira Code', 'Fira Mono', 'Roboto Mono', monospace", width: 80, background: '#010409', borderRadius: 5, color: '#e6edf3', fontSize: 12, padding: '4px 6px', outline: '1px solid #30363d', borderTop: 'none', borderRight: 'none', borderBottom: 'none', borderLeft: 'none' }}
+    />
+  );
+}
+
 function IdraulicaSection({
-  omogen, denitri, sbr, disinf, idraul, setIdraul, Q_calc,
+  omogen, namolExces, denitri, bufferSbr, sbr, disinf, idraul, setIdraul, Q_calc,
 }: {
-  omogen: OmogenState; denitri: DenitriState; sbr: SBRState; disinf: DisinfState;
+  omogen: OmogenState; namolExces: NamolExcesState; denitri: DenitriState; bufferSbr: BufferSBRState; sbr: SBRState; disinf: DisinfState;
   idraul: IdraulicaState; setIdraul: (v: IdraulicaState) => void; Q_calc: number;
 }) {
   const nodeIds = getAllNodeIds(sbr.n_reattori);
-  const sceneNodes = buildSceneNodes(omogen, denitri, sbr, disinf, idraul.overrides);
+  const sceneNodes = buildSceneNodes(omogen, namolExces, denitri, bufferSbr, sbr, disinf, idraul.overrides);
   const sceneCons = buildSceneConnections(idraul.connections, sceneNodes);
   const results = calcIdraulicaAll(idraul.connections, Q_calc);
 
@@ -2557,12 +2588,9 @@ function IdraulicaSection({
                   <td style={{ padding: '6px 10px', color: n.color, fontWeight: 600 }}>{getNodeLabel(n.id)}</td>
                   {(['x', 'y', 'z_fondo'] as (keyof NodeOverride)[]).map(field => (
                     <td key={field} style={{ padding: '4px 8px' }}>
-                      <input
-                        type="number"
-                        step="0.01"
+                      <NodeFieldInput
                         value={getOv(n.id, field as keyof NodeOverride)}
-                        onChange={e => { const v = parseFloat(e.target.value); if (!isNaN(v)) setOverride(n.id, field as keyof NodeOverride, v); }}
-                        style={{ ...mono, width: 80, background: '#010409', borderRadius: 5, color: C.text, fontSize: 12, padding: '4px 6px', outline: '1px solid #30363d', borderTop: 'none', borderRight: 'none', borderBottom: 'none', borderLeft: 'none' }}
+                        onCommit={v => setOverride(n.id, field as keyof NodeOverride, v)}
                       />
                     </td>
                   ))}
@@ -2723,37 +2751,52 @@ function IdraulicaSection({
 // ============================================================
 
 function ProfiloIdraulico({
-  pf, setPf, perc_denitri,
+  pf, setPf,
+  omogen_l, namol_l, denitri_l, buffer_l, disinf_l,
 }: {
   pf: ProfiloIdraulicoState;
   setPf: (v: ProfiloIdraulicoState) => void;
-  perc_denitri: number;
+  omogen_l: number; namol_l: number; denitri_l: number; buffer_l: number; disinf_l: number;
 }) {
   const res = calcProfilo(pf);
 
   // SVG layout constants
-  const W = 900;
-  const H = 460;
-  const SCALE = 32; // px per metro
-  const Z_MAX = 7.0;
-  const X_MARGIN = 52;
-  function toY(z: number): number { return 40 + (Z_MAX - z) * SCALE; }
+  const W = 920;
+  const H = 500;
+  const SCALE = 33;
+  const Z_MAX = 7.5;
+  const X_MARGIN = 55;
+  function toY(z: number): number { return 44 + (Z_MAX - z) * SCALE; }
 
   const yGround = toY(0);
 
-  // Tank X positions
-  const TX_SX = 120;
-  const TW_SX = 120;
-  const TX_DX = 310;
-  const TW_DX = 120;
-  const TW_DENITRI = Math.max(20, Math.round(TW_DX * perc_denitri / 100));
-  const TW_ACCUMULO = TW_DX - TW_DENITRI;
-  const TX_ACCUMULO = TX_DX + TW_DENITRI;
-  const TX_SBR = 510;
-  const TW_SBR = 130;
-  const TX_SCARICO = 710;
+  // Left tank proportional widths
+  const sx_total_l = (omogen_l > 0 && namol_l > 0) ? omogen_l + namol_l : 14.2;
+  const TW_SX = 158;
+  const TW_OMOGEN = Math.max(20, Math.round(TW_SX * omogen_l / sx_total_l));
+  const TW_NAMOL = TW_SX - TW_OMOGEN;
 
-  // Colors
+  // Right tank proportional widths
+  const dx_total_l = (denitri_l > 0 && buffer_l > 0 && disinf_l > 0) ? denitri_l + buffer_l + disinf_l : 12.45;
+  const TW_DX = 152;
+  const TW_DENITRI = Math.max(16, Math.round(TW_DX * denitri_l / dx_total_l));
+  const TW_BUFFER = Math.max(16, Math.round(TW_DX * buffer_l / dx_total_l));
+  const TW_DISINF = Math.max(12, TW_DX - TW_DENITRI - TW_BUFFER);
+
+  // X positions
+  const TX_GRIGLIA = 72;
+  const TW_GRIGLIA = 38;
+  const TX_SX = 145;
+  const TX_OMOGEN = TX_SX;
+  const TX_NAMOL = TX_SX + TW_OMOGEN;
+  const TX_DX = TX_SX + TW_SX + 28;
+  const TX_DENITRI = TX_DX;
+  const TX_BUFFER = TX_DX + TW_DENITRI;
+  const TX_DISINF = TX_BUFFER + TW_BUFFER;
+  const TX_SBR = TX_DX + TW_DX + 30;
+  const TW_SBR = 110;
+  const TX_SCARICO_TEXT = TX_SBR + TW_SBR + 20;
+
   const COL_WATER = '#2f81f7';
   const COL_SLUDGE = '#d29922';
   const COL_GRAV = '#3fb950';
@@ -2761,56 +2804,38 @@ function ProfiloIdraulico({
   const COL_GROUND = '#8b949e';
   const COL_WALL = '#30363d';
 
-  function tankRect(tx: number, tw: number, zFondo: number, zPelo: number, zTop: number, colWater: string, label: string, subLabel: string) {
-    const yFondo = toY(zFondo);
-    const yPelo = toY(zPelo);
-    const yTop = toY(zTop);
-    const wallH = yFondo - yTop;
-    return (
-      <g key={label}>
-        {/* Wall */}
-        <rect x={tx} y={yTop} width={tw} height={wallH} fill="#0d1520" stroke={COL_WALL} strokeWidth="1.5" />
-        {/* Water fill */}
-        <rect x={tx + 1} y={yPelo} width={tw - 2} height={yFondo - yPelo} fill={colWater} fillOpacity="0.25" />
-        {/* Water level line */}
-        <line x1={tx} y1={yPelo} x2={tx + tw} y2={yPelo} stroke={colWater} strokeWidth="2" />
-        {/* Label */}
-        <text x={tx + tw / 2} y={yTop - 16} textAnchor="middle" fill={COL_WATER} fontSize="10" fontFamily="monospace" fontWeight="700">{label}</text>
-        <text x={tx + tw / 2} y={yTop - 6} textAnchor="middle" fill={COL_GROUND} fontSize="9" fontFamily="monospace">{subLabel}</text>
-        {/* Pelo libre quota */}
-        <text x={tx + tw + 4} y={yPelo + 4} fill={colWater} fontSize="9" fontFamily="monospace">{fmt(zPelo, 2)}</text>
-        {/* Fondo quota */}
-        <text x={tx + tw + 4} y={yFondo + 4} fill={COL_GROUND} fontSize="9" fontFamily="monospace">{fmt(zFondo, 2)}</text>
-      </g>
-    );
-  }
+  const yPeloSx = toY(res.quota_pelo_sx);
+  const yPeloDx = toY(res.quota_pelo_dx);
+  const yFondoSx = toY(pf.quota_fondo_sx);
+  const yFondoDx = toY(pf.quota_fondo_dx);
+  const yTopSx = toY(pf.quota_fondo_sx + pf.altezza_utile_sx + 0.30);
+  const yTopDx = toY(pf.quota_fondo_dx + res.altezza_totale_dx + 0.30);
+  const yFondoSbr = toY(pf.quota_fondo_sbr);
+  const yTopSbr = toY(pf.quota_fondo_sbr + res.altezza_sbr);
+  const yPeloSbr = toY(res.quota_pelo_sbr - 0.8);
 
-  function connArrow(x1: number, y1: number, x2: number, y2: number, isGrav: boolean, head: number, label: string) {
+  function connArrow(key: string, x1: number, y1: number, x2: number, y2: number, isGrav: boolean, head: number) {
     const color = isGrav ? COL_GRAV : COL_PUMP;
     const mid_x = (x1 + x2) / 2;
-    const mid_y = (y1 + y2) / 2;
+    const mid_y = Math.min(y1, y2) - 10;
+    const markId = 'arr-' + key;
     return (
-      <g key={label}>
+      <g key={key}>
         <defs>
-          <marker id={'arr-' + label} markerWidth="8" markerHeight="8" refX="4" refY="2" orient="auto">
+          <marker id={markId} markerWidth="8" markerHeight="8" refX="6" refY="2" orient="auto">
             <path d="M0,0 L8,2 L0,4 Z" fill={color} />
           </marker>
         </defs>
-        <line x1={x1} y1={y1} x2={x2} y2={y2} stroke={color} strokeWidth="2" strokeDasharray={isGrav ? 'none' : '5,3'} markerEnd={'url(#arr-' + label + ')'} />
-        <text x={mid_x} y={mid_y - 6} textAnchor="middle" fill={color} fontSize="10" fontFamily="monospace" fontWeight="700">
-          {isGrav ? '↓ G' : 'P'}
+        <line x1={x1} y1={y1} x2={x2} y2={y2} stroke={color} strokeWidth="2" strokeDasharray={isGrav ? 'none' : '5,3'} markerEnd={'url(#' + markId + ')'} />
+        <text x={mid_x} y={mid_y} textAnchor="middle" fill={color} fontSize="10" fontFamily="monospace" fontWeight="700">
+          {isGrav ? '↓G' : 'P'}
         </text>
         {!isGrav && head > 0 && (
-          <text x={mid_x} y={mid_y + 8} textAnchor="middle" fill={color} fontSize="9" fontFamily="monospace">{fmt(head, 2) + ' m'}</text>
+          <text x={mid_x} y={mid_y + 12} textAnchor="middle" fill={color} fontSize="9" fontFamily="monospace">{fmt(head, 2) + ' m'}</text>
         )}
       </g>
     );
   }
-
-  const yPeloSx = toY(res.quota_pelo_sx);
-  const yPeloDx = toY(res.quota_pelo_dx);
-  const yFondoSbr = toY(pf.quota_fondo_sbr);
-  const yAccumulo = toY(res.quota_accumulo);
 
   return (
     <div>
@@ -2819,20 +2844,20 @@ function ProfiloIdraulico({
       <Card>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10 }}>
           <div>
-            <div style={{ ...mono, fontSize: 10, color: C.purple, marginBottom: 6, textTransform: 'uppercase' as const, letterSpacing: '0.05em', fontWeight: 700 }}>Vasca Sinistra (Omogen + Namol)</div>
+            <div style={{ fontFamily: "'SF Mono', 'Fira Code', 'Fira Mono', 'Roboto Mono', monospace", fontSize: 10, color: C.purple, marginBottom: 6, textTransform: 'uppercase' as const, letterSpacing: '0.05em', fontWeight: 700 }}>Vasca Sinistra (Omogen + Namol)</div>
             <NumInput label="Quota fondo" value={pf.quota_fondo_sx} unit="m" step={0.05} onChange={v => setPf({ ...pf, quota_fondo_sx: v })} />
             <NumInput label="Altezza utile" value={pf.altezza_utile_sx} unit="m" step={0.05} onChange={v => setPf({ ...pf, altezza_utile_sx: v })} />
             <ResultRow label="Quota pelo lib. sx" value={fmt(res.quota_pelo_sx, 2)} unit="m" highlight />
           </div>
           <div>
-            <div style={{ ...mono, fontSize: 10, color: C.amber, marginBottom: 6, textTransform: 'uppercase' as const, letterSpacing: '0.05em', fontWeight: 700 }}>Vasca Destra (Denitri + Accumulo)</div>
+            <div style={{ fontFamily: "'SF Mono', 'Fira Code', 'Fira Mono', 'Roboto Mono', monospace", fontSize: 10, color: C.amber, marginBottom: 6, textTransform: 'uppercase' as const, letterSpacing: '0.05em', fontWeight: 700 }}>Vasca Destra (Denitri + Buffer + Disinf)</div>
             <NumInput label="Quota fondo" value={pf.quota_fondo_dx} unit="m" step={0.05} onChange={v => setPf({ ...pf, quota_fondo_dx: v })} />
             <NumInput label="Altezza utile" value={pf.altezza_utile_dx} unit="m" step={0.05} onChange={v => setPf({ ...pf, altezza_utile_dx: v })} />
             <NumInput label="Sopraelevazione" value={pf.sopraelevazione_dx} unit="m" step={0.05} onChange={v => setPf({ ...pf, sopraelevazione_dx: v })} />
             <ResultRow label="Quota pelo lib. dx" value={fmt(res.quota_pelo_dx, 2)} unit="m" highlight />
           </div>
           <div>
-            <div style={{ ...mono, fontSize: 10, color: C.green, marginBottom: 6, textTransform: 'uppercase' as const, letterSpacing: '0.05em', fontWeight: 700 }}>Moduli SBR (fuori terra)</div>
+            <div style={{ fontFamily: "'SF Mono', 'Fira Code', 'Fira Mono', 'Roboto Mono', monospace", fontSize: 10, color: C.green, marginBottom: 6, textTransform: 'uppercase' as const, letterSpacing: '0.05em', fontWeight: 700 }}>Moduli SBR (fuori terra)</div>
             <NumInput label="Quota fondo SBR" value={pf.quota_fondo_sbr} unit="m" step={0.05} onChange={v => setPf({ ...pf, quota_fondo_sbr: v })} />
             <ResultRow label="Altezza SBR (fissa)" value="5.00" unit="m" />
             <ResultRow label="Quota pelo SBR" value={fmt(res.quota_pelo_sbr, 2)} unit="m" highlight />
@@ -2847,84 +2872,127 @@ function ProfiloIdraulico({
 
       {/* SVG Profile */}
       <Card>
-        <div style={{ ...mono, fontSize: 11, color: C.textMid, marginBottom: 10, textTransform: 'uppercase' as const, letterSpacing: '0.05em' }}>
-          Profilo Idraulico — Sezione Verticale
+        <div style={{ fontFamily: "'SF Mono', 'Fira Code', 'Fira Mono', 'Roboto Mono', monospace", fontSize: 11, color: C.textMid, marginBottom: 10, textTransform: 'uppercase' as const, letterSpacing: '0.05em' }}>
+          Profilo Idraulico — Sezione Verticale (da sinistra a destra)
         </div>
         <svg viewBox={'0 0 ' + W + ' ' + H} style={{ width: '100%', background: '#0d1117', borderRadius: 6, display: 'block' }}>
 
-          {/* Vertical scale */}
-          {[-4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 6].map(z => (
+          {/* Vertical scale grid */}
+          {[-4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 6, 7].map(z => (
             <g key={z}>
               <line x1={X_MARGIN - 4} y1={toY(z)} x2={W - 10} y2={toY(z)} stroke={z === 0 ? '#3fb950' : '#1c2535'} strokeWidth={z === 0 ? 1.5 : 0.5} strokeDasharray={z === 0 ? '6,3' : '2,4'} />
               <text x={X_MARGIN - 8} y={toY(z) + 4} textAnchor="end" fill={z === 0 ? '#3fb950' : '#3d4d5e'} fontSize="9" fontFamily="monospace">{(z >= 0 ? '+' : '') + z.toFixed(2)}</text>
             </g>
           ))}
-
-          {/* Ground level label */}
-          <text x={W - 12} y={yGround - 4} textAnchor="end" fill="#3fb950" fontSize="9" fontFamily="monospace" fontWeight="700">p.c. = 0.00 m</text>
+          <text x={W - 12} y={yGround - 4} textAnchor="end" fill="#3fb950" fontSize="9" fontFamily="monospace" fontWeight="700">p.c.</text>
 
           {/* Fognatura arrow */}
           <defs>
-            <marker id="arrf" markerWidth="8" markerHeight="8" refX="6" refY="2" orient="auto">
-              <path d="M0,0 L8,2 L0,4 Z" fill={C.textMid} />
+            <marker id="arrf0" markerWidth="8" markerHeight="8" refX="6" refY="2" orient="auto">
+              <path d="M0,0 L8,2 L0,4 Z" fill={COL_GROUND} />
             </marker>
           </defs>
-          <line x1={10} y1={toY(pf.quota_arrivo_fognatura)} x2={TX_SX - 4} y2={toY(pf.quota_arrivo_fognatura)} stroke={C.textMid} strokeWidth="2" markerEnd="url(#arrf)" />
-          <text x={12} y={toY(pf.quota_arrivo_fognatura) - 5} fill={C.textMid} fontSize="9" fontFamily="monospace">{'Fognatura ' + fmt(pf.quota_arrivo_fognatura, 2) + ' m'}</text>
+          <line x1={10} y1={toY(pf.quota_arrivo_fognatura)} x2={TX_GRIGLIA} y2={toY(pf.quota_arrivo_fognatura)} stroke={COL_GROUND} strokeWidth="2" markerEnd="url(#arrf0)" />
+          <text x={12} y={toY(pf.quota_arrivo_fognatura) - 5} fill={COL_GROUND} fontSize="9" fontFamily="monospace">{'Fogn. ' + fmt(pf.quota_arrivo_fognatura, 2) + ' m'}</text>
 
-          {/* Left tank */}
-          {tankRect(TX_SX, TW_SX, pf.quota_fondo_sx, res.quota_pelo_sx, pf.quota_fondo_sx + pf.altezza_utile_sx + 0.3, COL_SLUDGE, 'Omogenizare', 'Namol exces')}
+          {/* Griglia (small channel above ground) */}
+          <rect x={TX_GRIGLIA} y={yGround - 22} width={TW_GRIGLIA} height={22} fill="#141a24" stroke={COL_WALL} strokeWidth="1.5" />
+          <text x={TX_GRIGLIA + TW_GRIGLIA / 2} y={yGround - 28} textAnchor="middle" fill={COL_GROUND} fontSize="9" fontFamily="monospace">Griglia</text>
+          <text x={TX_GRIGLIA + TW_GRIGLIA / 2} y={yGround - 8} textAnchor="middle" fill={COL_GROUND} fontSize="8" fontFamily="monospace">{fmt(pf.quota_scarico_griglia, 2)}</text>
 
-          {/* Connection 1: griglia -> omogen */}
-          {connArrow(TX_SX - 20, toY(pf.quota_scarico_griglia), TX_SX, toY(pf.quota_scarico_griglia), res.connections[0].gravity, res.connections[0].head, 'c1')}
+          {/* Arrow c1: Griglia to Omogen */}
+          {connArrow('c1', TX_GRIGLIA + TW_GRIGLIA, toY(pf.quota_scarico_griglia), TX_SX, toY(pf.quota_scarico_griglia), res.connections[0].gravity, res.connections[0].head)}
 
-          {/* Connection 2: omogen -> denitri */}
-          {connArrow(TX_SX + TW_SX, yPeloSx, TX_DX, yPeloSx, res.connections[1].gravity, res.connections[1].head, 'c2')}
+          {/* LEFT TANK — unified rectangle */}
+          <rect x={TX_SX} y={yTopSx} width={TW_SX} height={yFondoSx - yTopSx} fill="#0d1520" stroke={COL_WALL} strokeWidth="1.5" />
+          {/* Water fill — omogen */}
+          <rect x={TX_OMOGEN + 1} y={yPeloSx} width={TW_OMOGEN - 1} height={yFondoSx - yPeloSx} fill={COL_SLUDGE} fillOpacity="0.20" />
+          {/* Water fill — namol */}
+          <rect x={TX_NAMOL} y={yPeloSx} width={TW_NAMOL - 1} height={yFondoSx - yPeloSx} fill={COL_SLUDGE} fillOpacity="0.12" />
+          {/* Pelo libre line sx */}
+          <line x1={TX_SX} y1={yPeloSx} x2={TX_SX + TW_SX} y2={yPeloSx} stroke={COL_SLUDGE} strokeWidth="2" />
+          {/* Internal dashed divider between Omogen and Namol */}
+          <line x1={TX_NAMOL} y1={yTopSx} x2={TX_NAMOL} y2={yFondoSx} stroke={COL_SLUDGE} strokeWidth="1.2" strokeDasharray="5,3" />
+          {/* Labels */}
+          <text x={TX_OMOGEN + TW_OMOGEN / 2} y={yTopSx - 16} textAnchor="middle" fill={COL_SLUDGE} fontSize="9" fontFamily="monospace" fontWeight="700">Omogenizare</text>
+          <text x={TX_NAMOL + TW_NAMOL / 2} y={yTopSx - 16} textAnchor="middle" fill={COL_SLUDGE} fontSize="9" fontFamily="monospace" fontWeight="700">Namol exces</text>
+          <text x={TX_SX + TW_SX + 3} y={yPeloSx + 4} fill={COL_SLUDGE} fontSize="8" fontFamily="monospace">{fmt(res.quota_pelo_sx, 2)}</text>
+          <text x={TX_SX + TW_SX + 3} y={yFondoSx + 4} fill={COL_GROUND} fontSize="8" fontFamily="monospace">{fmt(pf.quota_fondo_sx, 2)}</text>
 
-          {/* Right tank — Compartimento A: Denitrificazione */}
-          {tankRect(TX_DX, TW_DENITRI, pf.quota_fondo_dx, res.quota_pelo_dx, pf.quota_fondo_dx + res.altezza_totale_dx + 0.3, COL_WATER, 'Denitrificare', String(perc_denitri) + '%')}
+          {/* Arrow c2: Omogen to Denitri */}
+          {connArrow('c2', TX_SX + TW_SX, yPeloSx, TX_DX, yPeloSx, res.connections[1].gravity, res.connections[1].head)}
 
-          {/* Right tank — Compartimento B: Accumulo + Disinfezione */}
-          {tankRect(TX_ACCUMULO, TW_ACCUMULO, pf.quota_fondo_dx, res.quota_pelo_dx, pf.quota_fondo_dx + res.altezza_totale_dx + 0.3, '#1a6a9a', 'Accumulo', 'Disinf.')}
+          {/* RIGHT TANK — unified rectangle */}
+          <rect x={TX_DX} y={yTopDx} width={TW_DX} height={yFondoDx - yTopDx} fill="#0d1520" stroke={COL_WALL} strokeWidth="1.5" />
+          {/* Water fill — denitri */}
+          <rect x={TX_DENITRI + 1} y={yPeloDx} width={TW_DENITRI - 1} height={yFondoDx - yPeloDx} fill={COL_WATER} fillOpacity="0.18" />
+          {/* Water fill — buffer */}
+          <rect x={TX_BUFFER} y={yPeloDx} width={TW_BUFFER} height={yFondoDx - yPeloDx} fill={COL_WATER} fillOpacity="0.15" />
+          {/* Water fill — disinf */}
+          <rect x={TX_DISINF} y={yPeloDx} width={TW_DISINF - 1} height={yFondoDx - yPeloDx} fill={COL_WATER} fillOpacity="0.10" />
+          {/* Pelo libre line dx */}
+          <line x1={TX_DX} y1={yPeloDx} x2={TX_DX + TW_DX} y2={yPeloDx} stroke={COL_WATER} strokeWidth="2" />
+          {/* Internal dashed dividers */}
+          <line x1={TX_BUFFER} y1={yTopDx} x2={TX_BUFFER} y2={yFondoDx} stroke={COL_WATER} strokeWidth="1.2" strokeDasharray="5,3" />
+          <line x1={TX_DISINF} y1={yTopDx} x2={TX_DISINF} y2={yFondoDx} stroke={COL_WATER} strokeWidth="1.2" strokeDasharray="5,3" />
+          {/* Labels */}
+          <text x={TX_DENITRI + TW_DENITRI / 2} y={yTopDx - 16} textAnchor="middle" fill={COL_WATER} fontSize="9" fontFamily="monospace" fontWeight="700">Denitrif.</text>
+          <text x={TX_BUFFER + TW_BUFFER / 2} y={yTopDx - 16} textAnchor="middle" fill={COL_WATER} fontSize="9" fontFamily="monospace" fontWeight="700">Buffer SBR</text>
+          <text x={TX_DISINF + TW_DISINF / 2} y={yTopDx - 16} textAnchor="middle" fill={COL_WATER} fontSize="9" fontFamily="monospace" fontWeight="700">Disinf.</text>
+          <text x={TX_DX + TW_DX + 3} y={yPeloDx + 4} fill={COL_WATER} fontSize="8" fontFamily="monospace">{fmt(res.quota_pelo_dx, 2)}</text>
+          <text x={TX_DX + TW_DX + 3} y={yFondoDx + 4} fill={COL_GROUND} fontSize="8" fontFamily="monospace">{fmt(pf.quota_fondo_dx, 2)}</text>
 
-          {/* Setto divisorio tratteggiato */}
-          <line x1={TX_ACCUMULO} y1={toY(pf.quota_fondo_dx + res.altezza_totale_dx + 0.3)} x2={TX_ACCUMULO} y2={toY(pf.quota_fondo_dx)} stroke={C.amber} strokeWidth="1.5" strokeDasharray="6,3" />
+          {/* Arrow c3: Denitri to SBR */}
+          {connArrow('c3', TX_DX + TW_DX, yPeloDx, TX_SBR, yFondoSbr, res.connections[2].gravity, res.connections[2].head)}
 
-          {/* Accumulo level indicator */}
-          <line x1={TX_DX} y1={yAccumulo} x2={TX_DX + TW_DX} y2={yAccumulo} stroke={C.amber} strokeWidth="1" strokeDasharray="4,2" />
-          <text x={TX_DX - 4} y={yAccumulo + 4} textAnchor="end" fill={C.amber} fontSize="8" fontFamily="monospace">acc.</text>
+          {/* SBR tank (fuori terra) */}
+          <rect x={TX_SBR} y={yTopSbr} width={TW_SBR} height={yFondoSbr - yTopSbr} fill="#0d1520" stroke={C.green} strokeWidth="1.5" />
+          <rect x={TX_SBR + 1} y={yPeloSbr} width={TW_SBR - 2} height={yFondoSbr - yPeloSbr} fill={COL_WATER} fillOpacity="0.18" />
+          <line x1={TX_SBR} y1={yPeloSbr} x2={TX_SBR + TW_SBR} y2={yPeloSbr} stroke={COL_WATER} strokeWidth="2" />
+          <text x={TX_SBR + TW_SBR / 2} y={yTopSbr - 16} textAnchor="middle" fill={C.green} fontSize="10" fontFamily="monospace" fontWeight="700">SBR</text>
+          <text x={TX_SBR + TW_SBR / 2} y={yTopSbr - 6} textAnchor="middle" fill={COL_GROUND} fontSize="9" fontFamily="monospace">h=5.00 m</text>
+          <text x={TX_SBR + TW_SBR + 3} y={toY(res.quota_pelo_sbr) + 4} fill={C.green} fontSize="8" fontFamily="monospace">{fmt(res.quota_pelo_sbr, 2)}</text>
+          <text x={TX_SBR + TW_SBR + 3} y={yFondoSbr + 4} fill={COL_GROUND} fontSize="8" fontFamily="monospace">{fmt(pf.quota_fondo_sbr, 2)}</text>
 
-          {/* Connection 3: denitri -> SBR */}
-          {connArrow(TX_DX + TW_DX, yPeloDx, TX_SBR, yFondoSbr, res.connections[2].gravity, res.connections[2].head, 'c3')}
+          {/* Arrow c4: SBR to Buffer SBR */}
+          {connArrow('c4', TX_SBR, yFondoSbr, TX_BUFFER + TW_BUFFER / 2, yPeloDx, res.connections[3].gravity, res.connections[3].head)}
 
-          {/* SBR module */}
-          {tankRect(TX_SBR, TW_SBR, pf.quota_fondo_sbr, res.quota_pelo_sbr - 1.0, res.quota_pelo_sbr, COL_WATER, 'SBR', 'h=5.00 m')}
+          {/* c5: Buffer to Disinf (communicating, show as small notch symbol) */}
+          <text x={TX_DISINF} y={(yTopDx + yFondoDx) / 2 + 4} textAnchor="middle" fill={COL_WATER} fontSize="10" fontFamily="monospace">{'⟺'}</text>
 
-          {/* Connection 4: SBR -> accumulo (compartimento B) */}
-          {connArrow(TX_SBR, yFondoSbr, TX_ACCUMULO + TW_ACCUMULO / 2, yAccumulo, res.connections[3].gravity, res.connections[3].head, 'c4')}
+          {/* Arrow c6: Disinf to Scarico */}
+          {connArrow('c6', TX_DX + TW_DX, yPeloDx, TX_SCARICO_TEXT - 10, toY(pf.quota_scarico), res.connections[5].gravity, res.connections[5].head)}
+          <text x={TX_SCARICO_TEXT} y={toY(pf.quota_scarico) + 4} fill={COL_GROUND} fontSize="9" fontFamily="monospace">{'Scarico ' + fmt(pf.quota_scarico, 2) + ' m'}</text>
 
-          {/* Connection 5: accumulo -> scarico */}
-          {connArrow(TX_ACCUMULO + TW_ACCUMULO / 2, yAccumulo, TX_SCARICO, toY(pf.quota_scarico), res.connections[4].gravity, res.connections[4].head, 'c5')}
-          <text x={TX_SCARICO + 4} y={toY(pf.quota_scarico) + 4} fill={COL_GROUND} fontSize="9" fontFamily="monospace">{'Scarico ' + fmt(pf.quota_scarico, 2) + ' m'}</text>
         </svg>
       </Card>
 
       {/* Connection summary table */}
       <Card>
-        <div style={{ ...mono, fontSize: 11, color: C.textMid, marginBottom: 10, textTransform: 'uppercase' as const, letterSpacing: '0.05em' }}>
+        <div style={{ fontFamily: "'SF Mono', 'Fira Code', 'Fira Mono', 'Roboto Mono', monospace", fontSize: 11, color: C.textMid, marginBottom: 10, textTransform: 'uppercase' as const, letterSpacing: '0.05em' }}>
           Riepilogo Connessioni
         </div>
         {res.connections.map((c, i) => (
           <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 12px', borderRadius: 6, marginBottom: 4, background: c.gravity ? '#0d1f17' : '#1f0d0d', outline: '1px solid ' + (c.gravity ? '#1a3d2d' : '#3d1a1a') }}>
-            <span style={{ ...mono, fontSize: 12, color: C.text }}>{c.nome}</span>
+            <span style={{ fontFamily: "'SF Mono', 'Fira Code', 'Fira Mono', 'Roboto Mono', monospace", fontSize: 12, color: C.text }}>{c.nome}</span>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-              {!c.gravity && c.head > 0 && <span style={{ ...mono, fontSize: 11, color: C.red }}>{'H = ' + fmt(c.head, 2) + ' m'}</span>}
+              {!c.gravity && c.head > 0 && <span style={{ fontFamily: "'SF Mono', 'Fira Code', 'Fira Mono', 'Roboto Mono', monospace", fontSize: 11, color: C.red }}>{'H = ' + fmt(c.head, 2) + ' m'}</span>}
               <StatusBadge ok={c.gravity} label={c.gravity ? 'GRAVITA' : 'POMPA'} />
             </div>
           </div>
         ))}
+        {/* Sludge return connections (informational) */}
+        {[
+          { nome: 'SBR → Namol Exces (linea fanghi)', note: 'Pompaggio fanghi di supero' },
+          { nome: 'Namol Exces → Omogenizare (ricircolo)', note: 'Ricircolo fanghi disidratati' },
+        ].map((c, i) => (
+          <div key={'sl' + i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 12px', borderRadius: 6, marginBottom: 4, background: '#1a1400', outline: '1px solid #3d2e00' }}>
+            <span style={{ fontFamily: "'SF Mono', 'Fira Code', 'Fira Mono', 'Roboto Mono', monospace", fontSize: 12, color: C.amber }}>{c.nome}</span>
+            <span style={{ fontFamily: "'SF Mono', 'Fira Code', 'Fira Mono', 'Roboto Mono', monospace", fontSize: 10, color: C.textMid }}>{c.note}</span>
+          </div>
+        ))}
         {res.connections.some(c => !c.gravity) && (
-          <div style={{ ...mono, fontSize: 11, color: C.amber, marginTop: 10, padding: '8px 12px', background: '#1f1800', borderRadius: 6, outline: '1px solid ' + C.amber }}>
+          <div style={{ fontFamily: "'SF Mono', 'Fira Code', 'Fira Mono', 'Roboto Mono', monospace", fontSize: 11, color: C.amber, marginTop: 10, padding: '8px 12px', background: '#1f1800', borderRadius: 6, outline: '1px solid ' + C.amber }}>
             {res.connections.filter(c => !c.gravity).map(c => '⚠ ' + c.note).join('  |  ')}
           </div>
         )}
@@ -3236,7 +3304,14 @@ export default function App() {
           <Denitrificazione d={denitri} setD={setDenitri} Q_med={Q_med} N_in={portate.N} profilo={profilo} />
         )}
         {activeSection === 'profilo' && (
-          <ProfiloIdraulico pf={profilo} setPf={setProfilo} perc_denitri={denitri.perc_denitri} />
+          <ProfiloIdraulico
+            pf={profilo} setPf={setProfilo}
+            omogen_l={omogen.dims.l}
+            namol_l={namolExces.dims.l}
+            denitri_l={denitri.dims.l}
+            buffer_l={bufferSbr.dims.l}
+            disinf_l={disinf.dims.l}
+          />
         )}
         {activeSection === 'sbr' && (
           <SBR s={sbr} setS={setSbr} Q_med={Q_med} BOD5_in={portate.BOD5} />
@@ -3257,7 +3332,7 @@ export default function App() {
         )}
         {activeSection === 'idraul' && (
           <IdraulicaSection
-            omogen={omogen} denitri={denitri} sbr={sbr} disinf={disinf}
+            omogen={omogen} namolExces={namolExces} denitri={denitri} bufferSbr={bufferSbr} sbr={sbr} disinf={disinf}
             idraul={idraul} setIdraul={setIdraul}
             Q_calc={Q_or_max}
           />
