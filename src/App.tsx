@@ -83,9 +83,13 @@ interface DimsState {
 
 interface OmogenState {
   dims: DimsState;
-  t_accumulo: number;
+  t_picco: number;
   n_mixer: number;
   w_mixer: number;
+}
+
+interface BufferSBRState {
+  dims: DimsState;
 }
 
 interface DenitriState {
@@ -263,14 +267,26 @@ function calcPortate(p: PortateState) {
   return { Q_zi_med, Q_zi_med_ora, Q_zi_max, Q_or_max, Q_or_min };
 }
 
-function calcOmogen(o: OmogenState, Q_med: number) {
+function calcOmogen(o: OmogenState, Q_med: number, Q_or_max: number) {
   const V_fisico = calcVol(o.dims.L, o.dims.l, o.dims.h);
-  const Q_h = safeDiv(Q_med, 24);
-  const V_necessario = Q_h * o.t_accumulo * 1.2;
-  const HRT = safeDiv(V_fisico, Q_h);
+  const Q_med_ora = safeDiv(Q_med, 24);
+  const dQ = Q_or_max - Q_med_ora;
+  const V_necessario = dQ > 0 ? dQ * o.t_picco : 0;
+  const V_sicurezza = V_necessario * 1.20;
+  const t_laminazione_eff = dQ > 0 ? safeDiv(V_fisico, dQ) : NaN;
+  const HRT_medio = safeDiv(V_fisico, Q_med_ora);
   const P_mixer_tot = V_fisico * o.w_mixer / 1000;
   const P_per_mixer = safeDiv(P_mixer_tot, o.n_mixer);
-  return { V_fisico, V_necessario, HRT, P_mixer_tot, P_per_mixer };
+  return { V_fisico, Q_med_ora, dQ, V_necessario, V_sicurezza, t_laminazione_eff, HRT_medio, P_mixer_tot, P_per_mixer };
+}
+
+function calcBufferSBR(b: BufferSBRState, Q_med: number, n_reattori: number, cicli_giorno: number) {
+  const V_fisico = calcVol(b.dims.L, b.dims.l, b.dims.h);
+  const Q_med_ora = safeDiv(Q_med, 24);
+  const HRT = safeDiv(V_fisico, Q_med_ora);
+  const V_per_ciclo_tot = n_reattori > 0 && cicli_giorno > 0 ? Q_med / (n_reattori * cicli_giorno) : NaN;
+  const n_cicli_accumulabili = V_per_ciclo_tot > 0 ? safeDiv(V_fisico, V_per_ciclo_tot) : NaN;
+  return { V_fisico, HRT, V_per_ciclo_tot, n_cicli_accumulabili };
 }
 
 function calcDenitri(d: DenitriState, Q_med: number, N_in: number) {
@@ -1138,24 +1154,48 @@ function Portate({ p, setP }: { p: PortateState; setP: (v: PortateState) => void
 // SEZIONE: OMOGENIZZAZIONE
 // ============================================================
 
-function Omogenizzazione({ o, setO, Q_med, profilo }: { o: OmogenState; setO: (v: OmogenState) => void; Q_med: number; profilo: ProfiloIdraulicoState }) {
-  const res = calcOmogen(o, Q_med);
-  const hrtOk = res.HRT >= 2 && res.HRT <= 8;
+function Omogenizzazione({ o, setO, Q_med, Q_or_max, profilo }: {
+  o: OmogenState; setO: (v: OmogenState) => void;
+  Q_med: number; Q_or_max: number; profilo: ProfiloIdraulicoState;
+}) {
+  const res = calcOmogen(o, Q_med, Q_or_max);
+  const dQOk = res.dQ > 0;
+  const vOk = res.V_fisico >= res.V_sicurezza;
+  const lamOk = !isNaN(res.t_laminazione_eff) && res.t_laminazione_eff >= o.t_picco;
   const pOk = res.P_per_mixer >= 1 && res.P_per_mixer <= 15;
-  const vOk = res.V_fisico >= res.V_necessario;
   const V_disponibile_sx = 92 * profilo.altezza_utile_sx;
-  const perc_utilizzo = safeDiv(res.V_necessario, V_disponibile_sx) * 100;
-  const utilizzoOk = perc_utilizzo <= 100;
+  const spazioOk = res.V_fisico <= V_disponibile_sx;
   const checks = [
-    { label: 'HRT: 2 <= ' + fmt(res.HRT, 1) + ' h <= 8', ok: hrtOk },
+    { label: 'dQ > 0 (Q_or_max > Q_med_ora)', ok: dQOk },
+    { label: 'V fisico >= V sicurezza (' + fmt(res.V_sicurezza, 1) + ' m3)', ok: vOk },
+    { label: 't laminazione >= t_picco (' + fmt(res.t_laminazione_eff, 2) + ' >= ' + o.t_picco + ' h)', ok: lamOk },
     { label: 'P mixer: 1 <= ' + fmt(res.P_per_mixer, 2) + ' kW <= 15', ok: pOk },
   ];
-  const warnings: string[] = !utilizzoOk
-    ? ['Volume fisico supera lo spazio assegnato nella vasca sinistra. Rivedere suddivisione nel Profilo Idraulico.']
-    : [];
+  const warnings: string[] = [];
+  if (!isNaN(res.HRT_medio) && res.HRT_medio < 2) warnings.push('HRT medio basso (' + fmt(res.HRT_medio, 1) + ' h) — possibile scarsa miscelazione.');
+  if (!isNaN(res.HRT_medio) && res.HRT_medio > 12) warnings.push('HRT molto alto (' + fmt(res.HRT_medio, 1) + ' h) — rischio fermentazione anaerobica.');
+  if (!spazioOk) warnings.push('Volume fisico supera lo spazio disponibile nella vasca sinistra. Rivedere suddivisione nel Profilo Idraulico.');
   return (
     <div>
-      <SectionTitle accent={C.purple}>Omogenizzazione</SectionTitle>
+      <SectionTitle accent={C.purple}>Omogenizzazione — Laminazione Portata di Punta</SectionTitle>
+      <Card>
+        <div style={{ ...mono, fontSize: 11, color: C.textMid, marginBottom: 12, padding: '8px 12px', background: '#0d1117', borderRadius: 6, borderLeft: '3px solid ' + C.purple }}>
+          {'Laminazione: accumula la portata di punta (Q_or_max) e la rilascia costante a valle (Q_med/24). dQ = Q_or_max - Q_med_ora.'}
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+          <div>
+            <div style={{ ...mono, fontSize: 10, color: C.textMid, marginBottom: 4, textTransform: 'uppercase' as const, letterSpacing: '0.05em' }}>Q oraria max (da Portate)</div>
+            <div style={{ ...mono, fontSize: 14, fontWeight: 700, color: C.text, padding: '6px 10px', background: '#0d1117', borderRadius: 6, outline: '1px solid ' + C.border }}>{fmt(Q_or_max, 2) + ' m3/h'}</div>
+          </div>
+          <div>
+            <div style={{ ...mono, fontSize: 10, color: C.textMid, marginBottom: 4, textTransform: 'uppercase' as const, letterSpacing: '0.05em' }}>Q media oraria</div>
+            <div style={{ ...mono, fontSize: 14, fontWeight: 700, color: C.text, padding: '6px 10px', background: '#0d1117', borderRadius: 6, outline: '1px solid ' + C.border }}>{fmt(res.Q_med_ora, 2) + ' m3/h'}</div>
+          </div>
+        </div>
+        <div style={{ marginTop: 10 }}>
+          <ResultRow label="Delta Q da laminare" value={fmt(res.dQ, 2)} unit="m3/h" highlight ok={dQOk} />
+        </div>
+      </Card>
       <Card>
         <div style={{ ...mono, fontSize: 11, color: C.textMid, marginBottom: 10, textTransform: 'uppercase' as const, letterSpacing: '0.05em' }}>
           Dimensioni Vasca
@@ -1164,21 +1204,27 @@ function Omogenizzazione({ o, setO, Q_med, profilo }: { o: OmogenState; setO: (v
       </Card>
       <Card>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-          <NumInput label="Tempo accumulo" value={o.t_accumulo} unit="h" step={0.5} onChange={v => setO({ ...o, t_accumulo: v })} />
+          <NumInput label="Durata periodo di punta" value={o.t_picco} unit="h" step={0.5} min={1} max={6} hint="Tipico: 2-4 h" onChange={v => setO({ ...o, t_picco: v })} />
           <NumInput label="N mixer" value={o.n_mixer} unit="" step={1} onChange={v => setO({ ...o, n_mixer: v })} />
           <NumInput label="W mixer" value={o.w_mixer} unit="W/m3" hint="cons. 4-8" step={1} onChange={v => setO({ ...o, w_mixer: v })} />
         </div>
       </Card>
       <Card>
         <div style={{ ...mono, fontSize: 11, color: C.textMid, marginBottom: 10, textTransform: 'uppercase' as const, letterSpacing: '0.05em' }}>
-          Risultati
+          Volume di Laminazione
         </div>
-        <ResultRow label="V fisico" value={fmt(res.V_fisico, 1)} unit="m3" highlight />
-        <ResultRow label="V necessario" value={fmt(res.V_necessario, 1)} unit="m3" ok={vOk} />
-        <ResultRow label="V disponibile vasca sx (92 m² × h)" value={fmt(V_disponibile_sx, 1)} unit="m3" />
-        <ResultRow label="Utilizzo vasca sx" value={fmt(perc_utilizzo, 1)} unit="%" ok={utilizzoOk} />
-        <ResultRow label="HRT" value={fmt(res.HRT, 1)} unit="h" ok={hrtOk} sub="range: 2 - 8 h" />
-        <ResultRow label="P mixer totale" value={fmt(res.P_mixer_tot, 2)} unit="kW" />
+        <ResultRow label="V fisico vasca" value={fmt(res.V_fisico, 1)} unit="m3" highlight />
+        <ResultRow label={'Volume min necessario (dQ x ' + o.t_picco + ' h)'} value={fmt(res.V_necessario, 1)} unit="m3" />
+        <ResultRow label="Volume con franco 20%" value={fmt(res.V_sicurezza, 1)} unit="m3" ok={vOk} highlight />
+        <ResultRow label="Durata laminazione effettiva" value={fmt(res.t_laminazione_eff, 2)} unit="h" ok={lamOk} sub={'necessario: ' + o.t_picco + ' h'} />
+        <ResultRow label="HRT a portata media" value={fmt(res.HRT_medio, 1)} unit="h" sub="informativo" />
+        <ResultRow label="Spazio disponibile vasca sx (92 m² x h)" value={fmt(V_disponibile_sx, 1)} unit="m3" ok={spazioOk} />
+      </Card>
+      <Card>
+        <div style={{ ...mono, fontSize: 11, color: C.textMid, marginBottom: 10, textTransform: 'uppercase' as const, letterSpacing: '0.05em' }}>
+          Mixer
+        </div>
+        <ResultRow label="P totale mixer" value={fmt(res.P_mixer_tot, 2)} unit="kW" />
         <ResultRow label="P per mixer" value={fmt(res.P_per_mixer, 2)} unit="kW" ok={pOk} sub="range: 1 - 15 kW" />
         <VerifyBox checks={checks} title="Omogenizzazione" />
         <WarnBox warnings={warnings} />
@@ -1489,6 +1535,93 @@ function SBR({ s, setS, Q_med, BOD5_in }: { s: SBRState; setS: (v: SBRState) => 
 // SEZIONE: DISINFEZIONE
 // ============================================================
 
+function BufferSBR({ b, setB, Q_med, n_reattori, cicli_giorno }: {
+  b: BufferSBRState; setB: (v: BufferSBRState) => void;
+  Q_med: number; n_reattori: number; cicli_giorno: number;
+}) {
+  const res = calcBufferSBR(b, Q_med, n_reattori, cicli_giorno);
+  const hrtOk = !isNaN(res.HRT) && res.HRT >= 0.5;
+  const cicliOk = !isNaN(res.n_cicli_accumulabili) && res.n_cicli_accumulabili >= 1;
+  const checks = [
+    { label: 'HRT >= 0.5 h (' + fmt(res.HRT, 2) + ' h)', ok: hrtOk },
+    { label: 'V >= 1 ciclo accumulo (' + fmt(res.n_cicli_accumulabili, 2) + ' cicli)', ok: cicliOk },
+  ];
+  return (
+    <div>
+      <SectionTitle accent={C.blue}>Buffer SBR — Accumulo tra Cicli e Disinfezione</SectionTitle>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 16 }}>
+        <Card>
+          <div style={{ ...mono, fontSize: 11, color: C.textMid, marginBottom: 10, textTransform: 'uppercase' as const, letterSpacing: '0.05em' }}>Portata di riferimento</div>
+          <div style={{ ...mono, fontSize: 13, color: C.textMid, marginBottom: 8 }}>
+            {'Q med giornaliero: '}
+            <span style={{ color: C.text }}>{fmt(Q_med, 1) + ' m³/g'}</span>
+          </div>
+          <div style={{ ...mono, fontSize: 13, color: C.textMid, marginBottom: 8 }}>
+            {'Q med orario: '}
+            <span style={{ color: C.text }}>{fmt(Q_med / 24, 2) + ' m³/h'}</span>
+          </div>
+          <div style={{ ...mono, fontSize: 13, color: C.textMid, marginBottom: 8 }}>
+            {'Reattori SBR: '}
+            <span style={{ color: C.text }}>{n_reattori}</span>
+          </div>
+          <div style={{ ...mono, fontSize: 13, color: C.textMid }}>
+            {'Cicli/giorno: '}
+            <span style={{ color: C.text }}>{cicli_giorno > 0 ? cicli_giorno : '—'}</span>
+          </div>
+        </Card>
+        <Card>
+          <div style={{ ...mono, fontSize: 11, color: C.textMid, marginBottom: 10, textTransform: 'uppercase' as const, letterSpacing: '0.05em' }}>Dimensioni vasca (da DWG)</div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10, marginBottom: 10 }}>
+            <NumInput label="L (m)" value={b.dims.L} min={0.1} step={0.1}
+              onChange={v => setB({ ...b, dims: { ...b.dims, L: v } })} />
+            <NumInput label="l (m)" value={b.dims.l} min={0.1} step={0.1}
+              onChange={v => setB({ ...b, dims: { ...b.dims, l: v } })} />
+            <NumInput label="h (m)" value={b.dims.h} min={0.1} step={0.1}
+              onChange={v => setB({ ...b, dims: { ...b.dims, h: v } })} />
+          </div>
+          <div style={{ ...mono, fontSize: 13, color: C.textMid }}>
+            {'V fisico = '}
+            <span style={{ color: C.text, fontWeight: 700 }}>{fmt(res.V_fisico, 2) + ' m³'}</span>
+          </div>
+        </Card>
+      </div>
+      <Card>
+        <div style={{ ...mono, fontSize: 11, color: C.textMid, marginBottom: 10, textTransform: 'uppercase' as const, letterSpacing: '0.05em' }}>Risultati Buffer</div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 16 }}>
+          <div>
+            <div style={{ ...mono, fontSize: 10, color: C.textMid, textTransform: 'uppercase' as const, letterSpacing: '0.08em', marginBottom: 4 }}>
+              HRT medio
+            </div>
+            <div style={{ ...mono, fontSize: 22, fontWeight: 700, color: hrtOk ? C.green : C.red }}>
+              {fmt(res.HRT, 2)}
+            </div>
+            <div style={{ ...mono, fontSize: 11, color: C.textMid }}>h  (min 0.5 h)</div>
+          </div>
+          <div>
+            <div style={{ ...mono, fontSize: 10, color: C.textMid, textTransform: 'uppercase' as const, letterSpacing: '0.08em', marginBottom: 4 }}>
+              V per ciclo tot
+            </div>
+            <div style={{ ...mono, fontSize: 22, fontWeight: 700, color: C.text }}>
+              {fmt(res.V_per_ciclo_tot, 2)}
+            </div>
+            <div style={{ ...mono, fontSize: 11, color: C.textMid }}>m³/ciclo (tutti i reattori)</div>
+          </div>
+          <div>
+            <div style={{ ...mono, fontSize: 10, color: C.textMid, textTransform: 'uppercase' as const, letterSpacing: '0.08em', marginBottom: 4 }}>
+              Cicli accumulabili
+            </div>
+            <div style={{ ...mono, fontSize: 22, fontWeight: 700, color: cicliOk ? C.green : C.red }}>
+              {fmt(res.n_cicli_accumulabili, 2)}
+            </div>
+            <div style={{ ...mono, fontSize: 11, color: C.textMid }}>cicli (min 1)</div>
+          </div>
+        </div>
+      </Card>
+      <VerifyBox checks={checks} title="Buffer SBR" />
+    </div>
+  );
+}
+
 function Disinfezione({ d, setD, Q_med }: { d: DisinfState; setD: (v: DisinfState) => void; Q_med: number }) {
   const res = calcDisinf(d, Q_med);
   const ctOk = res.CT >= NORM.disinf.CT_min;
@@ -1765,7 +1898,7 @@ function generateReport(
   idraul: IdraulicaState,
 ): string {
   const pRes = calcPortate(portate);
-  const oRes = calcOmogen(omogen, pRes.Q_zi_med);
+  const oRes = calcOmogen(omogen, pRes.Q_zi_med, pRes.Q_or_max);
   const dRes = calcDenitri(denitri, pRes.Q_zi_med, portate.N);
   const sRes = calcSBR(sbr, pRes.Q_zi_med, portate.BOD5);
   const diRes = calcDisinf(disinf, pRes.Q_or_max);
@@ -1773,8 +1906,8 @@ function generateReport(
   const today = new Date().toLocaleDateString('it-IT');
 
   const checks = [
-    { s: 'Omogen.', l: 'V fisico >= V necessario', ok: oRes.V_fisico >= oRes.V_necessario },
-    { s: 'Omogen.', l: 'HRT 2÷8 h', ok: oRes.HRT >= 2 && oRes.HRT <= 8 },
+    { s: 'Omogen.', l: 'V fisico >= V sicurezza', ok: oRes.V_fisico >= oRes.V_sicurezza },
+    { s: 'Omogen.', l: 't laminazione >= t_picco', ok: !isNaN(oRes.t_laminazione_eff) && oRes.t_laminazione_eff >= omogen.t_picco },
     { s: 'Omogen.', l: 'P mixer 1÷15 kW', ok: oRes.P_per_mixer >= 1 && oRes.P_per_mixer <= 15 },
     { s: 'Denitri.', l: 'HRT 1÷4 h', ok: dRes.HRT >= 1 && dRes.HRT <= 4 },
     { s: 'Denitri.', l: 'ΔN > 0', ok: dRes.dN > 0 },
@@ -1907,8 +2040,9 @@ function generateReport(
   <table>
     <thead><tr><th>Parametro</th><th>Valore</th><th>Range</th><th>Stato</th></tr></thead>
     <tbody>
-      ${parRow('HRT', fmt(oRes.HRT,2)+' h', '2÷8 h', oRes.HRT>=2&&oRes.HRT<=8)}
-      ${parRow('V necessario', fmt(oRes.V_necessario,1)+' m³', '<= '+fmt(oRes.V_fisico,1)+' m³', oRes.V_fisico>=oRes.V_necessario)}
+      ${parRow('HRT medio', fmt(oRes.HRT_medio,2)+' h', '2÷12 h', oRes.HRT_medio>=2&&oRes.HRT_medio<=12)}
+      ${parRow('V sicurezza (dQ×t_picco×1.20)', fmt(oRes.V_sicurezza,1)+' m³', '<= '+fmt(oRes.V_fisico,1)+' m³', oRes.V_fisico>=oRes.V_sicurezza)}
+      ${parRow('t laminazione effettiva', fmt(oRes.t_laminazione_eff,2)+' h', '>= '+omogen.t_picco+' h', !isNaN(oRes.t_laminazione_eff)&&oRes.t_laminazione_eff>=omogen.t_picco)}
       ${parRow('P per mixer', fmt(oRes.P_per_mixer,2)+' kW', '1÷15 kW', oRes.P_per_mixer>=1&&oRes.P_per_mixer<=15)}
     </tbody>
   </table>
@@ -1999,13 +2133,14 @@ function generateReport(
 }
 
 function Riepilogo({
-  dati, portate, omogen, denitri, sbr, disinf, idraul, profilo, namolExces, tratareNamol, chimice,
+  dati, portate, omogen, denitri, sbr, bufferSbr, disinf, idraul, profilo, namolExces, tratareNamol, chimice,
 }: {
   dati: DatiState;
   portate: PortateState;
   omogen: OmogenState;
   denitri: DenitriState;
   sbr: SBRState;
+  bufferSbr: BufferSBRState;
   disinf: DisinfState;
   idraul: IdraulicaState;
   profilo: ProfiloIdraulicoState;
@@ -2019,16 +2154,18 @@ function Riepilogo({
     if (w) { w.document.write(html); w.document.close(); }
   }
   const pRes = calcPortate(portate);
-  const oRes = calcOmogen(omogen, pRes.Q_zi_med);
+  const oRes = calcOmogen(omogen, pRes.Q_zi_med, pRes.Q_or_max);
   const dRes = calcDenitri(denitri, pRes.Q_zi_med, portate.N);
   const sRes = calcSBR(sbr, pRes.Q_zi_med, portate.BOD5);
   const diRes = calcDisinf(disinf, pRes.Q_or_max);
+  const bufRes = calcBufferSBR(bufferSbr, pRes.Q_zi_med, sbr.n_reattori, sRes.cicli_giorno);
   const nmRes = calcNamolExces(namolExces, sRes.Px, calcVol(omogen.dims.L, omogen.dims.l, omogen.dims.h), 92, profilo.altezza_utile_sx);
   const tnRes = calcTratareNamol(tratareNamol, nmRes.Q_fango_giorno, sRes.Px);
   const chRes = calcChimice(chimice, portate.P, pRes.Q_zi_med, disinf.c_cloro);
 
   const allChecks = [
-    { section: 'Omogen', label: 'HRT 2 - 8 h', ok: oRes.HRT >= 2 && oRes.HRT <= 8 },
+    { section: 'Omogen', label: 'V fisico >= V sicurezza', ok: oRes.V_fisico >= oRes.V_sicurezza },
+    { section: 'Omogen', label: 't laminazione >= t_picco', ok: !isNaN(oRes.t_laminazione_eff) && oRes.t_laminazione_eff >= omogen.t_picco },
     { section: 'Omogen', label: 'P mixer 1 - 15 kW', ok: oRes.P_per_mixer >= 1 && oRes.P_per_mixer <= 15 },
     { section: 'Denitri', label: 'HRT 1 - 4 h', ok: dRes.HRT >= 1 && dRes.HRT <= 4 },
     { section: 'Denitri', label: 'dN > 0', ok: dRes.dN > 0 },
@@ -2042,6 +2179,8 @@ function Riepilogo({
     { section: 'SBR', label: 'SRT 10 - 20 gg', ok: sbr.SRT >= NORM.bio.theta_c_min && sbr.SRT <= NORM.bio.theta_c_max },
     { section: 'SBR', label: 'MLSS 2500 - 4500 mg/L', ok: sbr.MLSS >= NORM.bio.MLSS_min && sbr.MLSS <= NORM.bio.MLSS_max },
     { section: 'SBR', label: 'O2 trasferito >= O2 richiesto', ok: sRes.O2_trasferito >= sRes.O2_richiesto },
+    { section: 'Buffer SBR', label: 'HRT buffer >= 0.5 h', ok: !isNaN(bufRes.HRT) && bufRes.HRT >= 0.5 },
+    { section: 'Buffer SBR', label: 'V >= 1 ciclo accumulo', ok: !isNaN(bufRes.n_cicli_accumulabili) && bufRes.n_cicli_accumulabili >= 1 },
     { section: 'Disinf', label: 'CT >= 30 mg·min/L', ok: diRes.CT >= NORM.disinf.CT_min },
     { section: 'Disinf', label: 'c cloro >= 0.5 mg/L', ok: disinf.c_cloro >= NORM.disinf.cl_min },
     { section: 'Disinf', label: 'V fisico >= V necessario', ok: diRes.V_fisico >= diRes.V_necessario },
@@ -2060,12 +2199,13 @@ function Riepilogo({
     { nome: 'Omogenizzazione', L: omogen.dims.L, l: omogen.dims.l, h: omogen.dims.h, V: oRes.V_fisico, n: 1 },
     { nome: 'Denitrificazione', L: denitri.dims.L, l: denitri.dims.l, h: denitri.dims.h, V: dRes.V_fisico, n: 1 },
     { nome: 'SBR (singolo)', L: sbr.dims.L, l: sbr.dims.l, h: sbr.dims.h, V: sRes.V_singolo, n: sbr.n_reattori },
+    { nome: 'Buffer SBR', L: bufferSbr.dims.L, l: bufferSbr.dims.l, h: bufferSbr.dims.h, V: bufRes.V_fisico, n: 1 },
     { nome: 'Disinfezione', L: disinf.dims.L, l: disinf.dims.l, h: disinf.dims.h, V: diRes.V_fisico, n: 1 },
   ];
 
-  const sections = ['Omogen', 'Denitri', 'SBR', 'Disinf', 'Namol', 'Filtro', 'Chimici'];
+  const sections = ['Omogen', 'Denitri', 'SBR', 'Buffer SBR', 'Disinf', 'Namol', 'Filtro', 'Chimici'];
   const sectionColors: Record<string, string> = {
-    'Omogen': C.purple, 'Denitri': C.amber, 'SBR': C.green, 'Disinf': C.red,
+    'Omogen': C.purple, 'Denitri': C.amber, 'SBR': C.green, 'Buffer SBR': C.blue, 'Disinf': C.red,
     'Namol': C.amber, 'Filtro': C.amber, 'Chimici': C.purple,
   };
 
@@ -2806,6 +2946,7 @@ const SECTIONS = [
   { id: 'denitri', label: 'Denitrificazione', icon: '⬡', accent: C.amber },
   { id: 'profilo', label: 'Profilo Idraulico', icon: '⇅', accent: C.blue },
   { id: 'sbr', label: 'Reattori SBR', icon: '▦', accent: C.green },
+  { id: 'buffer_sbr', label: 'Buffer SBR', icon: '⊞', accent: C.blue },
   { id: 'disinf', label: 'Disinfezione', icon: '✦', accent: C.red },
   { id: 'chimice', label: 'Substante Chimice', icon: '⬡', accent: C.purple },
   { id: 'idraul', label: 'Idraulica', icon: '⇢', accent: C.blue },
@@ -2853,14 +2994,14 @@ export default function App() {
   });
 
   const [omogen, setOmogen] = useState<OmogenState>({
-    dims: { L: 6, l: 3, h: 3 },
-    t_accumulo: 4,
+    dims: { L: 6.30, l: 7.00, h: 2.00 },
+    t_picco: 2.5,
     n_mixer: 2,
     w_mixer: 5,
   });
 
   const [denitri, setDenitri] = useState<DenitriState>({
-    dims: { L: 6, l: 3, h: 4 },
+    dims: { L: 7.80, l: 3.00, h: 1.50 },
     N_out_target: NORM.limiti.N_tot,
     n_mixer: 2,
     w_mixer: 4,
@@ -2883,7 +3024,7 @@ export default function App() {
   });
 
   const [disinf, setDisinf] = useState<DisinfState>({
-    dims: { L: 4, l: 2, h: 2 },
+    dims: { L: 7.80, l: 2.00, h: 1.50 },
     c_cloro: 1.0,
     t_contatto: 30,
   });
@@ -2893,8 +3034,12 @@ export default function App() {
     connections: [],
   });
 
+  const [bufferSbr, setBufferSbr] = useState<BufferSBRState>({
+    dims: { L: 7.80, l: 7.45, h: 1.50 },
+  });
+
   const [namolExces, setNamolExces] = useState<NamolExcesState>({
-    dims: { L: 4, l: 4, h: 3 },
+    dims: { L: 6.30, l: 7.20, h: 2.00 },
     t_stoccaggio: 10,
     c_ispessito: 15,
   });
@@ -2926,7 +3071,7 @@ export default function App() {
   const V_omogen_fisico_global = calcVol(omogen.dims.L, omogen.dims.l, omogen.dims.h);
 
   const saveProject = () => {
-    const state = { dati, portate, omogen, denitri, sbr, disinf, profiloIdraulico: profilo, idraulica: idraul, namolExces, tratareNamol, chimice };
+    const state = { dati, portate, omogen, denitri, sbr, bufferSbr, disinf, profiloIdraulico: profilo, idraulica: idraul, namolExces, tratareNamol, chimice };
     const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -2946,6 +3091,7 @@ export default function App() {
         if (s.omogen) setOmogen(s.omogen);
         if (s.denitri) setDenitri(s.denitri);
         if (s.sbr) setSbr(s.sbr);
+        if (s.bufferSbr) setBufferSbr(s.bufferSbr);
         if (s.disinf) setDisinf(s.disinf);
         if (s.profiloIdraulico) setProfilo(s.profiloIdraulico);
         if (s.idraulica) setIdraul(s.idraulica);
@@ -3069,7 +3215,7 @@ export default function App() {
           <Portate p={portate} setP={setPortate} />
         )}
         {activeSection === 'omogen' && (
-          <Omogenizzazione o={omogen} setO={setOmogen} Q_med={Q_med} profilo={profilo} />
+          <Omogenizzazione o={omogen} setO={setOmogen} Q_med={Q_med} Q_or_max={Q_or_max} profilo={profilo} />
         )}
         {activeSection === 'namol_exces' && (
           <NamolExces
@@ -3094,6 +3240,9 @@ export default function App() {
         )}
         {activeSection === 'sbr' && (
           <SBR s={sbr} setS={setSbr} Q_med={Q_med} BOD5_in={portate.BOD5} />
+        )}
+        {activeSection === 'buffer_sbr' && (
+          <BufferSBR b={bufferSbr} setB={setBufferSbr} Q_med={Q_med} n_reattori={sbr.n_reattori} cicli_giorno={sbrResGlobal.cicli_giorno} />
         )}
         {activeSection === 'disinf' && (
           <Disinfezione d={disinf} setD={setDisinf} Q_med={Q_or_max} />
@@ -3120,6 +3269,7 @@ export default function App() {
             omogen={omogen}
             denitri={denitri}
             sbr={sbr}
+            bufferSbr={bufferSbr}
             disinf={disinf}
             idraul={idraul}
             profilo={profilo}
